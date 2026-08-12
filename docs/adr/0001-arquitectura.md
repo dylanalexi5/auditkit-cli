@@ -76,6 +76,17 @@ basta), no motor de reportes (markdown armado a mano desde los
   no frases como "production-ready" o "battle-tested", no conteo de
   features. Ampliar la cobertura de afirmaciones queda fuera de alcance
   hasta que se pida.
+- **`build_check.py` nunca instala las dependencias del repo auditado.**
+  Corre `pytest` en el entorno del propio auditor, sin `pip install` previo
+  del repo clonado. Por eso no puede detectar fallos que solo aparecen con
+  las librerías reales instaladas (bugs de integración, versiones
+  incompatibles) — solo detecta si un import falla o no. Para mitigar el
+  falso negativo más obvio (marcar como roto un repo sano solo porque no
+  instalamos sus deps), un `ModuleNotFoundError` de un paquete declarado en
+  `requirements.txt`/`pyproject.toml` (`RepoContext.declared_dependencies`)
+  se reporta como `APROBADO_CON_OBSERVACIONES`, no `NO_SOSTENIBLE` — la
+  ausencia de instalación queda visible como observación, no como fallo
+  real del repo.
 
 ## Verificación
 
