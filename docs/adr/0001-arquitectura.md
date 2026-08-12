@@ -66,6 +66,16 @@ basta), no motor de reportes (markdown armado a mano desde los
   (solo parsea Python) para extraer la verdad del código, y `deps_check.py`
   usa pip-audit (ecosistema PyPI). Repos en otros lenguajes quedan fuera de
   alcance hasta que se pida.
+- **`readme_check.py` valida solo existencia de tests, no que pasen.** Cuenta
+  funciones `test_*` reales vía `ast` para contrastar contra una afirmación
+  de coverage en el README — confirma que hay una suite de tests, no que esa
+  suite pase. Que los tests efectivamente pasen es responsabilidad de
+  `build_check.py`, que corre el comando real y captura el resultado.
+- **`readme_check.py` solo cubre afirmaciones de coverage (`N% coverage`).**
+  Es el único tipo de afirmación verificado en este MVP — no badges de CI,
+  no frases como "production-ready" o "battle-tested", no conteo de
+  features. Ampliar la cobertura de afirmaciones queda fuera de alcance
+  hasta que se pida.
 
 ## Verificación
 
