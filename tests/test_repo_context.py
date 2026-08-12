@@ -21,3 +21,12 @@ def test_from_path_parses_pyproject_dependencies(tmp_path: Path) -> None:
     ctx = RepoContext.from_path(tmp_path)
 
     assert ctx.declared_dependencies == {"requests", "pyyaml"}
+
+
+def test_from_path_survives_malformed_pyproject_toml(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("this is not [ valid toml")
+    (tmp_path / "requirements.txt").write_text("click>=8.0\n")
+
+    ctx = RepoContext.from_path(tmp_path)
+
+    assert ctx.declared_dependencies == {"click"}

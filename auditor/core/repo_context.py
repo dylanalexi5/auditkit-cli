@@ -31,7 +31,11 @@ def _parse_pyproject_toml(path: Path) -> set[str]:
     if not pyproject_file.is_file():
         return set()
 
-    data = tomllib.loads(pyproject_file.read_text(encoding="utf-8", errors="ignore"))
+    try:
+        data = tomllib.loads(pyproject_file.read_text(encoding="utf-8", errors="ignore"))
+    except tomllib.TOMLDecodeError:
+        return set()
+
     names = set()
     for dep in data.get("project", {}).get("dependencies", []):
         match = _NAME_TOKEN.match(dep.strip())
