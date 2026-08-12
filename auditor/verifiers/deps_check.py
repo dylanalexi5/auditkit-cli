@@ -6,16 +6,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from auditor.core.models import Evidence, Verdict, VerifierResult
+from auditor.core.models import Evidence, Verdict, VerifierResult, worst_verdict
 from auditor.core.repo_context import RepoContext, normalize_dependency_name, read_pyproject_toml
 
 _TIMEOUT_SECONDS = 60
 _NAME_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]+")
-_SEVERITY = {
-    Verdict.APROBADO: 0,
-    Verdict.APROBADO_CON_OBSERVACIONES: 1,
-    Verdict.NO_SOSTENIBLE: 2,
-}
 
 # Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
 # Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
@@ -120,8 +115,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
 
     def escalate(new_verdict: Verdict) -> None:
         nonlocal verdict
-        if _SEVERITY[new_verdict] > _SEVERITY[verdict]:
-            verdict = new_verdict
+        verdict = worst_verdict([verdict, new_verdict])
 
     entries = _extract_requirements(ctx.path)
     for dep in _run_pip_audit(entries):
