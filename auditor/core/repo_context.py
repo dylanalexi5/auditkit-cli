@@ -26,18 +26,20 @@ def _parse_requirements_txt(path: Path) -> set[str]:
     return names
 
 
-def _parse_pyproject_toml(path: Path) -> set[str]:
+def read_pyproject_toml(path: Path) -> dict:
     pyproject_file = path / "pyproject.toml"
     if not pyproject_file.is_file():
-        return set()
+        return {}
 
     try:
-        data = tomllib.loads(pyproject_file.read_text(encoding="utf-8", errors="ignore"))
+        return tomllib.loads(pyproject_file.read_text(encoding="utf-8", errors="ignore"))
     except tomllib.TOMLDecodeError:
-        return set()
+        return {}
 
+
+def _parse_pyproject_toml(path: Path) -> set[str]:
     names = set()
-    for dep in data.get("project", {}).get("dependencies", []):
+    for dep in read_pyproject_toml(path).get("project", {}).get("dependencies", []):
         match = _NAME_TOKEN.match(dep.strip())
         if match:
             names.add(normalize_dependency_name(match.group(0)))

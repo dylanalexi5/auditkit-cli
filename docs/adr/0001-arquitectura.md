@@ -51,6 +51,32 @@ Ninguna otra dependencia nueva: no ORM, no framework CLI (`argparse` stdlib
 basta), no motor de reportes (markdown armado a mano desde los
 `VerifierResult`).
 
+## Veredictos de deps_check.py
+
+| Situación | Veredicto |
+|---|---|
+| Vulnerabilidad real conocida (pip-audit, paquete declarado) | `NO_SOSTENIBLE` |
+| Import usado sin declarar, con mapeo conocido import↔paquete | `APROBADO_CON_OBSERVACIONES` |
+| Import usado sin declarar, sin mapeo conocido | `NO_SOSTENIBLE` |
+| Paquete declarado pero no usado en el código | `APROBADO_CON_OBSERVACIONES` |
+
+El peor veredicto entre todos los hallazgos gana (mismo criterio que el
+orchestrator aplicará entre verificadores).
+
+### Mapeos conocidos import↔paquete (lista abierta, no exhaustiva)
+
+| Se importa como | Se declara como |
+|---|---|
+| `sklearn` | `scikit-learn` |
+| `bs4` | `beautifulsoup4` |
+| `PIL` | `Pillow` |
+| `yaml` | `PyYAML` |
+| `cv2` | `opencv-python` |
+
+Estos son los casos más comunes donde el nombre de import y el nombre del
+paquete en PyPI divergen. La lista se amplía cuando aparezca un caso real,
+no se intenta cubrir todos los mismatches posibles del ecosistema.
+
 ## Limitaciones conocidas
 
 - **Solo se audita HEAD, no el historial de git.** El clonado usa `git clone
@@ -87,6 +113,27 @@ basta), no motor de reportes (markdown armado a mano desde los
   se reporta como `APROBADO_CON_OBSERVACIONES`, no `NO_SOSTENIBLE` — la
   ausencia de instalación queda visible como observación, no como fallo
   real del repo.
+- **`build_check.py` ejecuta código no confiable del repo auditado, sin
+  sandbox.** `subprocess.run([sys.executable, "-m", "pytest"], cwd=ctx.path)`
+  hace que pytest importe y corra `conftest.py` y cada `test_*.py` que
+  colecta — cualquier código ahí corre con los privilegios del propio
+  proceso auditor (filesystem, red, todo). Un repo malicioso con
+  `import os; os.system(...)` en un test alcanza para ejecutar código
+  arbitrario. Es un riesgo real y conocido, no un bug parcheable: es
+  inherente a "correr el comando de test real" sobre código no confiable.
+  Sandboxing (contenedor efímero sin red ni privilegios, filesystem de solo
+  lectura salvo `/tmp`) queda fuera de alcance del MVP — decisión de riesgo
+  aceptado, no descuido.
+- **El downgrade a `APROBADO_CON_OBSERVACIONES` en `build_check.py` confía
+  en `requirements.txt` del propio repo auditado.** `declared_dependencies`
+  lo controla por completo el repo que se está auditando — puede declarar
+  cualquier nombre plausible para convertir un `NO_SOSTENIBLE` real
+  (dependencia no declarada, bug real) en un veredicto blando. Es una
+  limitación de scope conocida: el MVP asume buena fe en lo declarado, no
+  verifica que el paquete exista de verdad antes de aceptar el downgrade.
+- **`deps_check.py` necesita acceso a red** (consulta PyPI/OSV vía
+  pip-audit para vulnerabilidades reales) — a diferencia de los otros tres
+  verificadores, que corren completamente offline sobre el repo clonado.
 
 ## Verificación
 
