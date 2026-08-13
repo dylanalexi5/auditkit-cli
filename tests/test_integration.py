@@ -32,3 +32,32 @@ def test_report_surfaces_findings_from_multiple_verifiers(tmp_path: Path) -> Non
     assert "AWS" in markdown
     assert "coverage" in markdown.lower()
     assert "totally_undeclared_thing" in markdown
+
+
+def test_secrets_verdict_does_not_depend_on_verifier_order(tmp_path: Path) -> None:
+    """build_check corre pytest dentro del repo clonado y deja .pytest_cache/.
+    Si secrets escanea despues, marcaba CACHEDIR.TAG como secreto: el mismo
+    repo daba veredicto distinto segun el orden del dict de verificadores."""
+    from auditor.verifiers import build_check
+
+    def _fixture(root: Path) -> Path:
+        root.mkdir()
+        (root / "pyproject.toml").write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+        )
+        tests_dir = root / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_ok.py").write_text("def test_thing():\n    assert True\n")
+        return root
+
+    primero_secrets = {"secrets": secrets.verify, "build_check": build_check.verify}
+    primero_build = {"build_check": build_check.verify, "secrets": secrets.verify}
+
+    veredictos = []
+    for nombre, verifiers in (("a", primero_secrets), ("b", primero_build)):
+        ctx = RepoContext.from_path(_fixture(tmp_path / nombre))
+        report = run(ctx, verifiers)
+        veredictos.append(report.verifier_results["secrets"])
+
+    assert veredictos[0].verdict == veredictos[1].verdict
+    assert veredictos[0].evidence == veredictos[1].evidence == []
