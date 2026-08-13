@@ -205,3 +205,34 @@ def test_verify_cli_only_dependency_is_not_flagged_as_unused(tmp_path: Path) -> 
 
     assert result.verdict == Verdict.APROBADO
     assert result.evidence == []
+
+
+def test_verify_undeclared_build_tool_import_is_observaciones(tmp_path: Path) -> None:
+    """noxfile.py importa nox sin declararlo: es la forma de pypa/sampleproject.
+    No es un repo roto, pero sigue siendo un dato a revisar - correr ese script
+    exige instalar nox aparte."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    (tmp_path / "noxfile.py").write_text(
+        "import nox\n\n\n@nox.session\ndef tests(session):\n    session.run('pytest')\n"
+    )
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert any(
+        "nox" in item.note and "herramienta" in item.note for item in result.evidence
+    ), f"se esperaba una observación explicando por qué nox no está declarado: {result.evidence}"
+
+
+def test_verify_undeclared_unknown_import_is_still_no_sostenible(tmp_path: Path) -> None:
+    """Guarda: la excepción es solo para herramientas de build conocidas."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    (tmp_path / "app.py").write_text("import totally_undeclared_thing\n")
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE

@@ -57,6 +57,7 @@ basta), no motor de reportes (markdown armado a mano desde los
 |---|---|
 | Vulnerabilidad real conocida (pip-audit, paquete declarado) | `NO_SOSTENIBLE` |
 | Import usado sin declarar, con mapeo conocido import↔paquete | `APROBADO_CON_OBSERVACIONES` |
+| Import usado sin declarar, de herramienta de build/automatización (`nox`, `tox`…) | `APROBADO_CON_OBSERVACIONES` |
 | Import usado sin declarar, sin mapeo conocido | `NO_SOSTENIBLE` |
 | Paquete declarado pero no usado en el código | `APROBADO_CON_OBSERVACIONES` |
 
@@ -91,6 +92,33 @@ públicos ajenos (`pypa/sampleproject`, `anxolerd/dvpwa`) y contra sí mismo:
 Las tres son exclusiones deliberadamente conservadoras: solo suprimen
 observaciones (`APROBADO_CON_OBSERVACIONES`) o un `NO_SOSTENIBLE` que era
 falso por construcción. Ninguna suprime una vulnerabilidad real de pip-audit.
+
+### Herramientas de build/automatización importadas sin declarar
+
+`nox`, `tox` y `make` son herramientas de automatización: para que el script
+que las invoca pueda correr, tienen que estar instaladas **antes** que el
+proyecto y por fuera de él. Un `noxfile.py` con `import nox`, o un `tox.ini`,
+describen cómo se automatiza el repo — no son código de la aplicación, y su
+herramienta no es una dependencia de runtime que el repo deba declarar en
+`requirements.txt`/`pyproject.toml`. `pypa/sampleproject`, el ejemplo canónico
+de la Python Packaging Authority, tiene exactamente esa forma: `noxfile.py`
+importa `nox` y `nox` no está declarado en ningún lado.
+
+Es el mismo tratamiento que `ruff`, `coverage` y `check-manifest`, con la
+única diferencia de la dirección en que aparecen: aquellos suelen estar
+declarados y no importarse, mientras que `nox`/`tox` suelen importarse sin
+estar declarados. Ambas direcciones consultan la misma lista abierta,
+`_CLI_ONLY_PACKAGES`.
+
+**Veredicto: `APROBADO_CON_OBSERVACIONES`, no `APROBADO`.** Un import sin
+declarar sigue siendo un dato que quien lee el reporte debería ver — que la
+herramienta sea de build explica por qué no está declarada, no borra el
+hecho de que correr ese script requiere instalarla aparte. Lo que deja de
+ser es `NO_SOSTENIBLE`: no es un repo roto.
+
+`make` se documenta acá por completitud del criterio, pero no aparece en la
+lista: no es un paquete de PyPI y no existe `import make`, así que nunca
+llega a este verificador.
 
 ## Veredictos de build_check.py: "no verificado" vs. "corridos y fallaron"
 

@@ -25,10 +25,15 @@ _NO_DEPS_FILE = "(no se encontró archivo de dependencias)"
 _DEPS_FILES = ("requirements.txt", "pyproject.toml", "poetry.lock")
 _VIA_COMMENT = re.compile(r"#\s*via\b", re.IGNORECASE)
 
-# Paquetes que se invocan como comando y nunca se importan desde el codigo.
-# Buscar su `import` y no encontrarlo no prueba nada, asi que reportarlos como
-# "declarado pero no se usa" es ruido garantizado. Lista abierta, igual que el
-# mapeo import->paquete de abajo.
+# Herramientas que viven por fuera del proyecto: se instalan aparte y se invocan
+# como comando. Se consulta en las dos direcciones, porque aparecen de las dos
+# formas segun la herramienta:
+#   - declaradas sin importarse (ruff, coverage): buscar su `import` y no
+#     encontrarlo no prueba nada.
+#   - importadas sin declararse (nox, tox): un noxfile.py necesita nox instalado
+#     ANTES que el proyecto, asi que no es una dependencia que el repo declare.
+# Las dos dan APROBADO_CON_OBSERVACIONES, nunca NO_SOSTENIBLE. Ver ADR.
+# Lista abierta, igual que el mapeo import->paquete de abajo.
 _CLI_ONLY_PACKAGES = {
     "ruff",
     "coverage",
@@ -307,6 +312,19 @@ def verify(ctx: RepoContext) -> VerifierResult:
                     note=(
                         f"'{module_name}' se importa pero fue declarado como "
                         f"'{mapped_package}' - mapeo conocido, no es un fallo real"
+                    ),
+                )
+            )
+            escalate(Verdict.APROBADO_CON_OBSERVACIONES)
+        elif module_name in _CLI_ONLY_PACKAGES:
+            evidence.append(
+                Evidence(
+                    file=undeclared_file,
+                    line=undeclared_line,
+                    note=(
+                        f"'{module_name}' se importa sin declarar, pero es una herramienta "
+                        "de build/automatizacion: tiene que estar instalada por fuera del "
+                        "proyecto para poder correr el script que la invoca"
                     ),
                 )
             )
