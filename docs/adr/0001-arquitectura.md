@@ -77,6 +77,21 @@ Estos son los casos más comunes donde el nombre de import y el nombre del
 paquete en PyPI divergen. La lista se amplía cuando aparezca un caso real,
 no se intenta cubrir todos los mismatches posibles del ecosistema.
 
+### Qué NO se reporta como "declarado pero no se usa"
+
+Tres clases de falso positivo detectadas corriendo el auditor contra repos
+públicos ajenos (`pypa/sampleproject`, `anxolerd/dvpwa`) y contra sí mismo:
+
+| Caso | Por qué no es un hallazgo |
+|---|---|
+| Paquete propio del repo en `src/<nombre>/` | Es el código del repo, no una dependencia. `_local_top_level_names()` escanea la raíz **y** `src/`, más el `name` declarado en `[project]`/`[tool.poetry]`. Sin esto el repo se reporta a sí mismo como import no declarado — un `NO_SOSTENIBLE` falso. |
+| Pin transitivo anotado `# via X` | Marca que dejan `pip-compile` y los `requirements.txt` anotados. El archivo mismo declara quién arrastra la dependencia; no es una dep directa que el código deba importar. |
+| Paquete de herramienta CLI (`ruff`, `coverage`, `nox`, `pytest`, `pip-audit`…) | Se invocan como comando, nunca se importan. Buscar su `import` y no encontrarlo no prueba nada. Lista abierta en `_CLI_ONLY_PACKAGES`. |
+
+Las tres son exclusiones deliberadamente conservadoras: solo suprimen
+observaciones (`APROBADO_CON_OBSERVACIONES`) o un `NO_SOSTENIBLE` que era
+falso por construcción. Ninguna suprime una vulnerabilidad real de pip-audit.
+
 ## Limitaciones conocidas
 
 - **Solo se audita HEAD, no el historial de git.** El clonado usa `git clone

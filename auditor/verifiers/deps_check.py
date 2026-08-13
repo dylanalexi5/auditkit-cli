@@ -23,6 +23,38 @@ _VCS_PREFIXES = ("git+", "hg+", "bzr+", "svn+")
 # el archivo citado.
 _NO_DEPS_FILE = "(no se encontró archivo de dependencias)"
 _DEPS_FILES = ("requirements.txt", "pyproject.toml", "poetry.lock")
+_VIA_COMMENT = re.compile(r"#\s*via\b", re.IGNORECASE)
+
+# Paquetes que se invocan como comando y nunca se importan desde el codigo.
+# Buscar su `import` y no encontrarlo no prueba nada, asi que reportarlos como
+# "declarado pero no se usa" es ruido garantizado. Lista abierta, igual que el
+# mapeo import->paquete de abajo.
+_CLI_ONLY_PACKAGES = {
+    "ruff",
+    "coverage",
+    "nox",
+    "tox",
+    "check_manifest",
+    "pip_audit",
+    "pytest",
+    "pytest_cov",
+    "pytest_asyncio",
+    "black",
+    "mypy",
+    "flake8",
+    "isort",
+    "pylint",
+    "bandit",
+    "pre_commit",
+    "twine",
+    "build",
+    "setuptools",
+    "wheel",
+    "pip",
+    "sphinx",
+    "mkdocs",
+    "detect_secrets",
+}
 
 # Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
 # Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
@@ -167,13 +199,55 @@ def _top_level_imports(path: Path) -> set[str]:
     return {normalize_dependency_name(name) for name in names}
 
 
-def _local_top_level_names(path: Path) -> set[str]:
+def _scan_dir_for_modules(directory: Path) -> set[str]:
     names: set[str] = set()
-    for child in path.iterdir():
+    if not directory.is_dir():
+        return names
+    for child in directory.iterdir():
         if child.is_dir() and (child / "__init__.py").is_file():
             names.add(normalize_dependency_name(child.name))
         elif child.is_file() and child.suffix == ".py":
             names.add(normalize_dependency_name(child.stem))
+    return names
+
+
+def _declared_project_names(path: Path) -> set[str]:
+    data = read_pyproject_toml(path)
+    candidates = (
+        data.get("project", {}).get("name"),
+        data.get("tool", {}).get("poetry", {}).get("name"),
+    )
+    return {normalize_dependency_name(str(name)) for name in candidates if name}
+
+
+def _local_top_level_names(path: Path) -> set[str]:
+    """Incluye el layout src/: con `src/<paquete>/` el paquete propio del repo no
+    es visible iterando solo la raiz, y termina reportado como import no
+    declarado - un NO_SOSTENIBLE falso contra el propio codigo del repo."""
+    return (
+        _scan_dir_for_modules(path)
+        | _scan_dir_for_modules(path / "src")
+        | _declared_project_names(path)
+    )
+
+
+def _transitive_pins(path: Path) -> set[str]:
+    """Un comentario `# via X` es la marca que dejan pip-compile y los
+    requirements.txt anotados para las dependencias transitivas. No son deps
+    directas del repo, asi que "declarada pero no se usa" para ellas es ruido:
+    el archivo mismo ya dice quien las arrastra."""
+    req_file = path / "requirements.txt"
+    if not req_file.is_file():
+        return set()
+
+    names: set[str] = set()
+    for line in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not _VIA_COMMENT.search(stripped):
+            continue
+        match = _NAME_TOKEN.match(stripped)
+        if match:
+            names.add(normalize_dependency_name(match.group(0)))
     return names
 
 
@@ -255,7 +329,10 @@ def verify(ctx: RepoContext) -> VerifierResult:
         for imp, pkg in _KNOWN_IMPORT_TO_PACKAGE.items()
         if imp in used_imports
     }
+    no_reportables = _transitive_pins(ctx.path) | _CLI_ONLY_PACKAGES
     for normalized_name in sorted(ctx.declared_dependencies - effectively_used):
+        if normalized_name in no_reportables:
+            continue
         source_file, line_number = _locate(entries, normalized_name, ctx.path)
         evidence.append(
             Evidence(

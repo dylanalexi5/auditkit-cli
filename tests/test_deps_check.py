@@ -160,3 +160,48 @@ def test_verify_does_not_cite_requirements_txt_when_repo_has_none(tmp_path: Path
         assert (tmp_path / item.file).is_file(), (
             f"la evidencia cita '{item.file}', que no existe en el repo"
         )
+
+
+def test_verify_src_layout_own_package_is_not_undeclared(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    pkg = tmp_path / "src" / "mypkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("def suma(a, b):\n    return a + b\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_suma.py").write_text(
+        "from mypkg import suma\n\n\ndef test_suma():\n    assert suma(1, 1) == 2\n"
+    )
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_transitive_pin_with_via_comment_is_not_flagged_as_unused(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "requirements.txt").write_text(
+        "click>=8.0\nattrs==25.3.0          # via click\n"
+    )
+    (tmp_path / "app.py").write_text("import click\n\nclick.echo('hi')\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_cli_only_dependency_is_not_flagged_as_unused(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("ruff>=0.6\ncoverage>=7.0\nnox>=2024.4.15\n")
+    (tmp_path / "app.py").write_text("print('hola')\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
