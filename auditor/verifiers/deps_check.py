@@ -4,12 +4,16 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 from auditor.core.models import Evidence, Verdict, VerifierResult, worst_verdict
 from auditor.core.repo_context import RepoContext, normalize_dependency_name, read_pyproject_toml
 
-_TIMEOUT_SECONDS = 60
+_TIMEOUT_SECONDS = 120
+_VULN_SCAN_TIMEOUT_NOTE = (
+    "pip-audit no pudo completarse a tiempo - vulnerabilidades no verificadas"
+)
 _NAME_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]+")
 _VCS_PREFIXES = ("git+", "hg+", "bzr+", "svn+")
 
@@ -34,6 +38,30 @@ def _is_safe_requirement_line(line: str) -> bool:
     return bool(_NAME_TOKEN.match(line))
 
 
+def _parse_poetry_lock(path: Path) -> list[tuple[str, int, str]]:
+    """poetry.lock trae versiones exactas ya resueltas - mas confiable que
+    aproximar los rangos ^/~ de [tool.poetry.dependencies] a mano."""
+    lock_file = path / "poetry.lock"
+    if not lock_file.is_file():
+        return []
+
+    try:
+        data = tomllib.loads(lock_file.read_text(encoding="utf-8", errors="ignore"))
+    except tomllib.TOMLDecodeError:
+        return []
+
+    entries = []
+    for pkg in data.get("package", []):
+        name = str(pkg.get("name", "")).strip()
+        version = str(pkg.get("version", "")).strip()
+        if not name or not version:
+            continue
+        requirement = f"{name}=={version}"
+        if _is_safe_requirement_line(requirement):
+            entries.append(("poetry.lock", 1, requirement))
+    return entries
+
+
 def _extract_requirements(path: Path) -> list[tuple[str, int, str]]:
     entries: list[tuple[str, int, str]] = []
     req_file = path / "requirements.txt"
@@ -45,6 +73,8 @@ def _extract_requirements(path: Path) -> list[tuple[str, int, str]]:
                 stripped
             ):
                 entries.append(("requirements.txt", line_number, stripped))
+
+    entries.extend(_parse_poetry_lock(path))
 
     for dep in read_pyproject_toml(path).get("project", {}).get("dependencies", []):
         if _is_safe_requirement_line(dep.strip()):
@@ -61,7 +91,10 @@ def _locate(entries: list[tuple[str, int, str]], normalized_name: str) -> tuple[
     return "requirements.txt", 1
 
 
-def _run_pip_audit(entries: list[tuple[str, int, str]]) -> list[dict]:
+def _run_pip_audit(entries: list[tuple[str, int, str]]) -> list[dict] | None:
+    """Devuelve None si pip-audit no pudo correr (timeout u otra falla del
+    subprocess) - distinto de [] (corrio bien, nada para reportar). Confundir
+    "no se pudo verificar" con "verificado, esta limpio" seria mentir."""
     if not entries:
         return []
 
@@ -89,13 +122,15 @@ def _run_pip_audit(entries: list[tuple[str, int, str]]) -> list[dict]:
             timeout=_TIMEOUT_SECONDS,
             check=False,
         )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     finally:
         req_path.unlink(missing_ok=True)
 
     try:
         return json.loads(result.stdout).get("dependencies", [])
     except json.JSONDecodeError:
-        return []
+        return None
 
 
 def _top_level_imports(path: Path) -> set[str]:
@@ -132,7 +167,13 @@ def verify(ctx: RepoContext) -> VerifierResult:
         verdict = worst_verdict([verdict, new_verdict])
 
     entries = _extract_requirements(ctx.path)
-    for dep in _run_pip_audit(entries):
+    pip_audit_results = _run_pip_audit(entries)
+    if pip_audit_results is None:
+        evidence.append(Evidence(file="pip-audit", line=0, note=_VULN_SCAN_TIMEOUT_NOTE))
+        escalate(Verdict.APROBADO_CON_OBSERVACIONES)
+        pip_audit_results = []
+
+    for dep in pip_audit_results:
         vulns = dep.get("vulns") or []
         if not vulns:
             continue

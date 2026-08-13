@@ -38,11 +38,30 @@ def read_pyproject_toml(path: Path) -> dict:
 
 
 def _parse_pyproject_toml(path: Path) -> set[str]:
+    data = read_pyproject_toml(path)
     names = set()
-    for dep in read_pyproject_toml(path).get("project", {}).get("dependencies", []):
+
+    # PEP 621 - lista de strings "name>=version"
+    project = data.get("project", {})
+    for dep in project.get("dependencies", []):
         match = _NAME_TOKEN.match(dep.strip())
         if match:
             names.add(normalize_dependency_name(match.group(0)))
+    for group_deps in project.get("optional-dependencies", {}).values():
+        for dep in group_deps:
+            match = _NAME_TOKEN.match(dep.strip())
+            if match:
+                names.add(normalize_dependency_name(match.group(0)))
+
+    # Poetry - tabla { name = "version" | {version=..., extras=...} }, no lista de strings
+    poetry = data.get("tool", {}).get("poetry", {})
+    for name in poetry.get("dependencies", {}):
+        if name.lower() != "python":
+            names.add(normalize_dependency_name(name))
+    for group in poetry.get("group", {}).values():
+        for name in group.get("dependencies", {}):
+            names.add(normalize_dependency_name(name))
+
     return names
 
 

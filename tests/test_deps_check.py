@@ -1,4 +1,6 @@
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 from auditor.core.models import Verdict
 from auditor.core.repo_context import RepoContext
@@ -16,6 +18,58 @@ def test_extract_requirements_rejects_vcs_and_url_lines(tmp_path: Path) -> None:
     entries = deps_check._extract_requirements(tmp_path)
 
     assert [raw for _, _, raw in entries] == ["click>=8.0"]
+
+
+def test_extract_requirements_reads_poetry_lock(tmp_path: Path) -> None:
+    (tmp_path / "poetry.lock").write_text(
+        "[[package]]\n"
+        'name = "fastapi"\n'
+        'version = "0.115.0"\n'
+        "[[package]]\n"
+        'name = "click"\n'
+        'version = "8.1.7"\n'
+    )
+
+    entries = deps_check._extract_requirements(tmp_path)
+
+    assert sorted(raw for _, _, raw in entries) == ["click==8.1.7", "fastapi==0.115.0"]
+
+
+def test_verify_poetry_declared_import_is_not_flagged_as_undeclared(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.poetry.dependencies]\npython = \"^3.11\"\nfastapi = \"^0.115.0\"\n"
+    )
+    (tmp_path / "app.py").write_text("import fastapi\n\nfastapi.FastAPI()\n")
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_run_pip_audit_returns_none_on_timeout() -> None:
+    entries = [("requirements.txt", 1, "click>=8.0")]
+    with patch(
+        "auditor.verifiers.deps_check.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="pip-audit", timeout=120),
+    ):
+        assert deps_check._run_pip_audit(entries) is None
+
+
+def test_verify_reports_observaciones_when_pip_audit_times_out(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("click>=8.0\n")
+    (tmp_path / "app.py").write_text("import click\n\nclick.echo('hi')\n")
+
+    with patch(
+        "auditor.verifiers.deps_check.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="pip-audit", timeout=120),
+    ):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert any(
+        "pip-audit" in e.file and "no pudo completarse" in e.note for e in result.evidence
+    )
 
 
 def test_verify_used_import_with_known_mapping_is_observaciones(tmp_path: Path) -> None:

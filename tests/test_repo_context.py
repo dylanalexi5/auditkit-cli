@@ -23,6 +23,21 @@ def test_from_path_parses_pyproject_dependencies(tmp_path: Path) -> None:
     assert ctx.declared_dependencies == {"requests", "pyyaml"}
 
 
+def test_from_path_parses_poetry_dependencies(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.poetry.dependencies]\n"
+        'python = "^3.11"\n'
+        'fastapi = "^0.115.0"\n'
+        'pydantic-settings = "^2.7.0"\n'
+        "[tool.poetry.group.dev.dependencies]\n"
+        'pytest = "^8.3.0"\n'
+    )
+
+    ctx = RepoContext.from_path(tmp_path)
+
+    assert ctx.declared_dependencies == {"fastapi", "pydantic_settings", "pytest"}
+
+
 def test_from_path_survives_malformed_pyproject_toml(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("this is not [ valid toml")
     (tmp_path / "requirements.txt").write_text("click>=8.0\n")
