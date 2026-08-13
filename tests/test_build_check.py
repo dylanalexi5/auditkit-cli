@@ -65,3 +65,37 @@ def test_verify_non_python_repo_is_aprobado(tmp_path: Path) -> None:
 
     assert result.verdict == Verdict.APROBADO
     assert result.evidence == []
+
+
+def test_verify_src_layout_own_package_is_importable(tmp_path: Path) -> None:
+    _write_pyproject(tmp_path)
+    pkg = tmp_path / "src" / "mypkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("def suma(a, b):\n    return a + b\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_suma.py").write_text(
+        "from mypkg import suma\n\n\ndef test_suma():\n    assert suma(1, 1) == 2\n"
+    )
+
+    result = build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_flat_layout_own_package_is_importable(tmp_path: Path) -> None:
+    _write_pyproject(tmp_path)
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("VALOR = 42\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_valor.py").write_text(
+        "from mypkg import VALOR\n\n\ndef test_valor():\n    assert VALOR == 42\n"
+    )
+
+    result = build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []

@@ -92,6 +92,37 @@ Las tres son exclusiones deliberadamente conservadoras: solo suprimen
 observaciones (`APROBADO_CON_OBSERVACIONES`) o un `NO_SOSTENIBLE` que era
 falso por construcción. Ninguna suprime una vulnerabilidad real de pip-audit.
 
+## Veredictos de build_check.py: "no verificado" vs. "corridos y fallaron"
+
+`APROBADO` de `build_check` no significa siempre lo mismo, y la diferencia
+importa: un veredicto blando porque *no pudimos comprobar* no es lo mismo que
+uno porque *comprobamos y está bien*. Estados exactos:
+
+| Situación | Veredicto | ¿Se corrió pytest? | Significado |
+|---|---|---|---|
+| Sin `pyproject.toml` / `setup.py` / `setup.cfg` | `APROBADO` | **No** | **No verificado.** No se detectó proyecto Python, no se ejecutó nada. |
+| `pytest` termina con exit 0 | `APROBADO` | Sí | **Verificado: los tests corrieron y pasaron.** |
+| `ModuleNotFoundError` de un paquete declarado en `requirements.txt`/`pyproject.toml` | `APROBADO_CON_OBSERVACIONES` | Sí, falló al importar | **No verificado.** Falta una dependencia externa que deliberadamente no instalamos; no es un fallo del repo. |
+| `pytest` falla por cualquier otra causa | `NO_SOSTENIBLE` | Sí | **Verificado: los tests corrieron y fallaron.** |
+
+El `ModuleNotFoundError` del **paquete propio del repo** ya no cae en ninguna
+de estas filas: `_pytest_env()` agrega la raíz y `src/` al `PYTHONPATH` antes
+de correr pytest, así que el paquete del repo es importable sin instalarlo.
+Antes de eso, cualquier repo con layout `src/` (incluido `pypa/sampleproject`,
+cuya suite pasa perfectamente) se reportaba `NO_SOSTENIBLE` sin estar roto.
+
+Se descartó `pip install -e .` para lograrlo: instalar el repo ejecuta su
+build backend — código del repo auditado, la misma clase de RCE que este ADR
+ya documenta — y además resuelve y descarga sus dependencias externas. Extender
+`PYTHONPATH` cubre el paquete propio sin ejecutar nada extra ni tocar la red.
+
+**Limitación que queda abierta:** la primera fila de la tabla sigue
+devolviendo `APROBADO` para "no verificado", igual que la segunda para
+"verificado y pasó". El reporte no distingue ambos casos hoy. Es la misma
+confusión que `deps_check._run_pip_audit()` sí evita (devuelve `None` para "no
+se pudo verificar", distinto de `[]` para "verificado, limpio"). Queda
+registrada acá como deuda conocida, no como comportamiento deseado.
+
 ## Limitaciones conocidas
 
 - **Solo se audita HEAD, no el historial de git.** El clonado usa `git clone
@@ -119,7 +150,9 @@ falso por construcción. Ninguna suprime una vulnerabilidad real de pip-audit.
   hasta que se pida.
 - **`build_check.py` nunca instala las dependencias del repo auditado.**
   Corre `pytest` en el entorno del propio auditor, sin `pip install` previo
-  del repo clonado. Por eso no puede detectar fallos que solo aparecen con
+  del repo clonado. Sí hace importable el paquete propio del repo vía
+  `PYTHONPATH` (raíz + `src/`), que no requiere instalar ni ejecutar nada —
+  ver la tabla de veredictos arriba. Por eso no puede detectar fallos que solo aparecen con
   las librerías reales instaladas (bugs de integración, versiones
   incompatibles) — solo detecta si un import falla o no. Para mitigar el
   falso negativo más obvio (marcar como roto un repo sano solo porque no

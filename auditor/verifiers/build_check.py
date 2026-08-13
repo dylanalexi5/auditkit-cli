@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 import sys
@@ -18,6 +19,28 @@ def _is_python_project(path: Path) -> bool:
     return any((path / marker).is_file() for marker in _PROJECT_MARKERS)
 
 
+def _pytest_env(path: Path) -> dict[str, str]:
+    """Hace importable el paquete propio del repo agregando la raiz y src/ al
+    PYTHONPATH. Sin esto, cualquier repo con layout src/ falla con
+    ModuleNotFoundError de su propio paquete y se reporta como roto sin estarlo.
+
+    Deliberadamente NO se usa `pip install -e .`: instalar el repo ejecuta su
+    build backend (setup.py / pyproject.toml), que es codigo del repo auditado,
+    y ademas resuelve y descarga sus dependencias externas. Ambas cosas estan
+    fuera del riesgo aceptado (ver ADR). Extender PYTHONPATH consigue lo mismo
+    para el paquete propio sin ejecutar nada extra ni tocar la red."""
+    entries = [str(path)]
+    src_dir = path / "src"
+    if src_dir.is_dir():
+        entries.append(str(src_dir))
+
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        entries.append(existing)
+
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(entries)}
+
+
 def verify(ctx: RepoContext) -> VerifierResult:
     if not _is_python_project(ctx.path):
         return VerifierResult(verdict=Verdict.APROBADO, evidence=[])
@@ -29,6 +52,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         text=True,
         timeout=_TIMEOUT_SECONDS,
         check=False,
+        env=_pytest_env(ctx.path),
     )
 
     if result.returncode == 0:
