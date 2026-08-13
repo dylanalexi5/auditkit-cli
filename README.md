@@ -36,7 +36,16 @@ una terminal.
   usadas-sin-declarar / declaradas-sin-usar.
 
 Cada uno devuelve APROBADO / APROBADO_CON_OBSERVACIONES / NO_SOSTENIBLE con
-evidencia archivo:línea. Detalle de diseño y limitaciones conocidas en
+evidencia archivo:línea:
+
+| Marca | Veredicto |
+|---|---|
+| ✅ | `APROBADO` |
+| 🔄 | `APROBADO_CON_OBSERVACIONES` |
+| ❌ | `NO_SOSTENIBLE` |
+| ⏸️ | verificador no ejecutado (ver [Uso](#uso)) |
+
+Detalle de diseño y limitaciones conocidas en
 [docs/adr/0001-arquitectura.md](docs/adr/0001-arquitectura.md).
 
 ## Seguridad

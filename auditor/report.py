@@ -6,7 +6,9 @@ from auditor.core.models import AuditReport, Verdict
 _VERDICT_EMOJI = {
     Verdict.APROBADO: "✅",
     Verdict.APROBADO_CON_OBSERVACIONES: "\U0001f504",
-    Verdict.NO_SOSTENIBLE: "⏳",
+    # ❌ y no ⏳: el reloj de arena se lee como "pendiente" o "en proceso", que
+    # es lo contrario de lo que significa el peor veredicto posible.
+    Verdict.NO_SOSTENIBLE: "❌",
 }
 
 
