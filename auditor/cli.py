@@ -5,10 +5,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from auditor.core.orchestrator import add_result
 from auditor.core.orchestrator import run as run_orchestrator
 from auditor.core.repo_context import RepoContext
 from auditor.report import to_json, to_markdown
-from auditor.verifiers import build_check, deps_check, readme_check, secrets
+from auditor.verifiers import build_check, deps_check, readme_check, secrets, semantic_check
 
 _PASSIVE_VERIFIERS = {
     "secrets": secrets.verify,
@@ -76,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
         help="corre build_check (ejecuta pytest real del repo auditado)",
     )
     parser.add_argument("--json", action="store_true", help="salida en JSON en vez de Markdown")
+    parser.add_argument(
+        "--semantic",
+        action="store_true",
+        help="corre semantic_check (usa la API de Groq, requiere GROQ_API_KEY)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -101,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
 
         ctx = RepoContext.from_path(repo_path)
         report = run_orchestrator(ctx, verifiers, skipped_verifiers=skipped)
+
+        if args.semantic:
+            semantic_result = semantic_check.verify(ctx, report.verifier_results)
+            report = add_result(report, "semantic_check", semantic_result)
 
     output = to_json(report, args.url) if args.json else to_markdown(report, args.url)
     print(output)

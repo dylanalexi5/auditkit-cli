@@ -141,7 +141,29 @@ de escribir el verificador (no se asume, se probó).
   contradictoria, afirmación sin evidencia relacionada, JSON malformado del
   modelo, sin `GROQ_API_KEY`) + un test contra la API real de Groq
   (mismo criterio que el test de `pip-audit` real en `deps_check.py`).
-- Mutation testing sobre `semantic_check.py` antes de darlo por bueno —
-  misma disciplina que el resto del proyecto.
+- Mutation testing sobre `semantic_check.py` (`cosmic-ray` — `mutmut` no
+  soporta Windows nativo, `mutatest` rompe con `random.sample` en Python
+  3.14). 123 mutantes, 36 sobrevivientes en la primera vuelta con
+  fixtures mas fuertes (evidencia no relacionada con conjunto no vacío,
+  claims individuales malformados dentro de una lista válida, múltiples
+  afirmaciones, `_locate_quote` probado directo). Los 36 sobrevivientes
+  finales, los tres explicados, ninguno es un gap real:
+  - 33 en anotaciones de retorno `X | None` (líneas 37/58/108) — Python
+    3.14 difiere la evaluación de anotaciones (PEP 649, confirmado
+    corriendo `def f(x) -> 1/0: ...` sin que explote hasta acceder a
+    `__annotations__`); mutarlas no cambia ningún comportamiento en
+    tiempo de ejecución.
+  - 1 en `choices[0]` → `choices[-1]` (línea 78) — equivalente para una
+    respuesta de un solo `choice`, que es lo único que pide este cliente.
+  - 2 en `index == -1` → `index <= -1` / `index is -1` (línea 101) —
+    `str.find()` nunca devuelve menos de -1 (equivalente matemático) y
+    CPython cachea enteros chicos (`is -1` se comporta igual que `== -1`
+    para ese valor).
+  Descontando esos 36, **100% de los mutantes no equivalentes murieron**
+  (87/87). Dos hallazgos reales que esto encontró y arregló: una
+  aserción tautológica propia (comparaba `kwargs["timeout"]` contra
+  `semantic_check._TIMEOUT_SECONDS`, el mismo atributo que mutaba) y un
+  fixture de `_locate_quote` que no distinguía `count(..., 0, ...)` de
+  `count(..., 1, ...)` por casualidad del texto de prueba.
 - `ruff check .` limpio.
 - Commit en rama aparte, PR en draft — no se mergea sin revisión.
