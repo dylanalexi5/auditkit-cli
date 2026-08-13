@@ -5,6 +5,19 @@ from auditor.core.repo_context import RepoContext
 from auditor.verifiers import deps_check
 
 
+def test_extract_requirements_rejects_vcs_and_url_lines(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text(
+        "click>=8.0\n"
+        "git+https://attacker.example/evil.git#egg=evil\n"
+        "https://attacker.example/pkg.whl\n"
+        "hg+https://attacker.example/evil\n"
+    )
+
+    entries = deps_check._extract_requirements(tmp_path)
+
+    assert [raw for _, _, raw in entries] == ["click>=8.0"]
+
+
 def test_verify_used_import_with_known_mapping_is_observaciones(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("scikit-learn==1.5.0\n")
     (tmp_path / "app.py").write_text("import sklearn\n\nsklearn.__version__\n")

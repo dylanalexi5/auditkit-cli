@@ -11,6 +11,7 @@ from auditor.core.repo_context import RepoContext, normalize_dependency_name, re
 
 _TIMEOUT_SECONDS = 60
 _NAME_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]+")
+_VCS_PREFIXES = ("git+", "hg+", "bzr+", "svn+")
 
 # Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
 # Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
@@ -23,6 +24,16 @@ _KNOWN_IMPORT_TO_PACKAGE = {
 }
 
 
+def _is_safe_requirement_line(line: str) -> bool:
+    """Rechaza VCS/URL/local-path requirements - pip-audit los resolveria via pip,
+    lo que puede descargar y ejecutar el build backend (setup.py/pyproject.toml)
+    de una fuente que el repo auditado controla por completo."""
+    lowered = line.lower()
+    if "://" in lowered or lowered.startswith(_VCS_PREFIXES):
+        return False
+    return bool(_NAME_TOKEN.match(line))
+
+
 def _extract_requirements(path: Path) -> list[tuple[str, int, str]]:
     entries: list[tuple[str, int, str]] = []
     req_file = path / "requirements.txt"
@@ -30,11 +41,14 @@ def _extract_requirements(path: Path) -> list[tuple[str, int, str]]:
         lines = req_file.read_text(encoding="utf-8", errors="ignore").splitlines()
         for line_number, line in enumerate(lines, start=1):
             stripped = line.strip()
-            if stripped and not stripped.startswith(("#", "-")):
+            if stripped and not stripped.startswith(("#", "-")) and _is_safe_requirement_line(
+                stripped
+            ):
                 entries.append(("requirements.txt", line_number, stripped))
 
     for dep in read_pyproject_toml(path).get("project", {}).get("dependencies", []):
-        entries.append(("pyproject.toml", 1, dep))
+        if _is_safe_requirement_line(dep.strip()):
+            entries.append(("pyproject.toml", 1, dep))
 
     return entries
 

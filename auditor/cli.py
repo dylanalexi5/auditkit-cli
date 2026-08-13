@@ -1,4 +1,5 @@
 import argparse
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,11 +18,29 @@ _PASSIVE_VERIFIERS = {
 _RUN_TESTS_WARNING = (
     "Este repo va a ejecutar código real (pytest) para build_check. ¿Confirmás? [y/N] "
 )
+# Solo https://github.com/<owner>/<repo> - nada de userinfo (credenciales embebidas),
+# nada de esquemas alternativos (ext::, file://, ssh://) que git interpreta como
+# transportes propios y pueden ejecutar comandos arbitrarios (ext::) o leer el
+# filesystem local (file://). Un "-" inicial tambien queda afuera: pasado tal cual a
+# git clone, una URL como "--upload-pack=..." se interpreta como flag, no como URL.
+_GITHUB_URL = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+(?:\.git)?/?$")
+
+
+class InvalidUrlError(ValueError):
+    pass
+
+
+def _validate_github_url(url: str) -> str:
+    if not _GITHUB_URL.match(url):
+        raise InvalidUrlError(
+            f"URL invalida: '{url}'. Solo se aceptan URLs https://github.com/<owner>/<repo>"
+        )
+    return url
 
 
 def _clone(url: str, dest: Path) -> None:
     subprocess.run(
-        ["git", "clone", "--depth", "1", url, str(dest)],
+        ["git", "clone", "--depth", "1", "--", url, str(dest)],
         check=True,
         capture_output=True,
         text=True,
@@ -58,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="salida en JSON en vez de Markdown")
     args = parser.parse_args(argv)
+
+    try:
+        _validate_github_url(args.url)
+    except InvalidUrlError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     verifiers = dict(_PASSIVE_VERIFIERS)
     skipped: list[str] = []
