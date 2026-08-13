@@ -128,3 +128,35 @@ def test_verify_clean_repo_is_aprobado(tmp_path: Path) -> None:
 
     assert result.verdict == Verdict.APROBADO
     assert result.evidence == []
+
+
+def test_verify_without_dependency_files_does_not_cite_a_path(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("import totally_undeclared_thing\n")
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    for item in result.evidence:
+        assert item.file == deps_check._NO_DEPS_FILE, (
+            f"la evidencia cita '{item.file}', que no existe en el repo"
+        )
+
+
+def test_verify_does_not_cite_requirements_txt_when_repo_has_none(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\n'
+        'name = "fixture"\n'
+        'version = "0.0.1"\n'
+        'dependencies = ["peppercorn"]\n'
+        '[project.optional-dependencies]\n'
+        'dev = ["check-manifest"]\n'
+    )
+    (tmp_path / "app.py").write_text("import totally_undeclared_thing\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    for item in result.evidence:
+        assert (tmp_path / item.file).is_file(), (
+            f"la evidencia cita '{item.file}', que no existe en el repo"
+        )

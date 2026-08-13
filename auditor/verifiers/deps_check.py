@@ -17,6 +17,13 @@ _VULN_SCAN_TIMEOUT_NOTE = (
 _NAME_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]+")
 _VCS_PREFIXES = ("git+", "hg+", "bzr+", "svn+")
 
+# Marcador explicito para cuando no hay ningun archivo de dependencias que citar.
+# Inventar "requirements.txt:1" en un repo que no tiene requirements.txt destruye
+# la premisa de la herramienta: la evidencia tiene que ser verificable abriendo
+# el archivo citado.
+_NO_DEPS_FILE = "(no se encontró archivo de dependencias)"
+_DEPS_FILES = ("requirements.txt", "pyproject.toml", "poetry.lock")
+
 # Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
 # Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
 _KNOWN_IMPORT_TO_PACKAGE = {
@@ -83,12 +90,24 @@ def _extract_requirements(path: Path) -> list[tuple[str, int, str]]:
     return entries
 
 
-def _locate(entries: list[tuple[str, int, str]], normalized_name: str) -> tuple[str, int]:
+def _deps_file_fallback(path: Path) -> tuple[str, int]:
+    """Cuando no se puede ubicar la linea exacta, citar un archivo de dependencias
+    que exista de verdad. Si el repo no tiene ninguno, decirlo explicitamente en
+    vez de inventar una ruta."""
+    for name in _DEPS_FILES:
+        if (path / name).is_file():
+            return name, 1
+    return _NO_DEPS_FILE, 0
+
+
+def _locate(
+    entries: list[tuple[str, int, str]], normalized_name: str, path: Path
+) -> tuple[str, int]:
     for source_file, line_number, raw in entries:
         match = _NAME_TOKEN.match(raw.strip())
         if match and normalize_dependency_name(match.group(0)) == normalized_name:
             return source_file, line_number
-    return "requirements.txt", 1
+    return _deps_file_fallback(path)
 
 
 def _run_pip_audit(entries: list[tuple[str, int, str]]) -> list[dict] | None:
@@ -178,7 +197,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         if not vulns:
             continue
         normalized_name = normalize_dependency_name(dep.get("name", ""))
-        source_file, line_number = _locate(entries, normalized_name)
+        source_file, line_number = _locate(entries, normalized_name, ctx.path)
         vuln_ids = ", ".join(sorted({v["id"] for v in vulns}))
         evidence.append(
             Evidence(
@@ -192,6 +211,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         )
         escalate(Verdict.NO_SOSTENIBLE)
 
+    undeclared_file, undeclared_line = _deps_file_fallback(ctx.path)
     used_imports = _top_level_imports(ctx.path)
     local_names = _local_top_level_names(ctx.path)
     stdlib_names = {normalize_dependency_name(name) for name in sys.stdlib_module_names}
@@ -205,7 +225,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
             normalize_dependency_name(mapped_package) if mapped_package else None
         )
         if mapped_normalized and mapped_normalized in ctx.declared_dependencies:
-            source_file, line_number = _locate(entries, mapped_normalized)
+            source_file, line_number = _locate(entries, mapped_normalized, ctx.path)
             evidence.append(
                 Evidence(
                     file=source_file,
@@ -220,8 +240,8 @@ def verify(ctx: RepoContext) -> VerifierResult:
         else:
             evidence.append(
                 Evidence(
-                    file="requirements.txt" if entries else "pyproject.toml",
-                    line=1,
+                    file=undeclared_file,
+                    line=undeclared_line,
                     note=(
                         f"'{module_name}' se importa en el codigo pero no esta declarado "
                         "en requirements.txt/pyproject.toml"
@@ -236,7 +256,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         if imp in used_imports
     }
     for normalized_name in sorted(ctx.declared_dependencies - effectively_used):
-        source_file, line_number = _locate(entries, normalized_name)
+        source_file, line_number = _locate(entries, normalized_name, ctx.path)
         evidence.append(
             Evidence(
                 file=source_file,
