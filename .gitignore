@@ -5,3 +5,4 @@ __pycache__/
 graphify-out/
 .pytest_cache/
 .ruff_cache/
+*.egg-info/
