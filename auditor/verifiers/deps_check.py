@@ -17,6 +17,50 @@ _VULN_SCAN_TIMEOUT_NOTE = (
 _NAME_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]+")
 _VCS_PREFIXES = ("git+", "hg+", "bzr+", "svn+")
 
+# Marcador explicito para cuando no hay ningun archivo de dependencias que citar.
+# Inventar "requirements.txt:1" en un repo que no tiene requirements.txt destruye
+# la premisa de la herramienta: la evidencia tiene que ser verificable abriendo
+# el archivo citado.
+_NO_DEPS_FILE = "(no se encontró archivo de dependencias)"
+_DEPS_FILES = ("requirements.txt", "pyproject.toml", "poetry.lock")
+_VIA_COMMENT = re.compile(r"#\s*via\b", re.IGNORECASE)
+
+# Herramientas que viven por fuera del proyecto: se instalan aparte y se invocan
+# como comando. Se consulta en las dos direcciones, porque aparecen de las dos
+# formas segun la herramienta:
+#   - declaradas sin importarse (ruff, coverage): buscar su `import` y no
+#     encontrarlo no prueba nada.
+#   - importadas sin declararse (nox, tox): un noxfile.py necesita nox instalado
+#     ANTES que el proyecto, asi que no es una dependencia que el repo declare.
+# Las dos dan APROBADO_CON_OBSERVACIONES, nunca NO_SOSTENIBLE. Ver ADR.
+# Lista abierta, igual que el mapeo import->paquete de abajo.
+_CLI_ONLY_PACKAGES = {
+    "ruff",
+    "coverage",
+    "nox",
+    "tox",
+    "check_manifest",
+    "pip_audit",
+    "pytest",
+    "pytest_cov",
+    "pytest_asyncio",
+    "black",
+    "mypy",
+    "flake8",
+    "isort",
+    "pylint",
+    "bandit",
+    "pre_commit",
+    "twine",
+    "build",
+    "setuptools",
+    "wheel",
+    "pip",
+    "sphinx",
+    "mkdocs",
+    "detect_secrets",
+}
+
 # Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
 # Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
 _KNOWN_IMPORT_TO_PACKAGE = {
@@ -83,12 +127,24 @@ def _extract_requirements(path: Path) -> list[tuple[str, int, str]]:
     return entries
 
 
-def _locate(entries: list[tuple[str, int, str]], normalized_name: str) -> tuple[str, int]:
+def _deps_file_fallback(path: Path) -> tuple[str, int]:
+    """Cuando no se puede ubicar la linea exacta, citar un archivo de dependencias
+    que exista de verdad. Si el repo no tiene ninguno, decirlo explicitamente en
+    vez de inventar una ruta."""
+    for name in _DEPS_FILES:
+        if (path / name).is_file():
+            return name, 1
+    return _NO_DEPS_FILE, 0
+
+
+def _locate(
+    entries: list[tuple[str, int, str]], normalized_name: str, path: Path
+) -> tuple[str, int]:
     for source_file, line_number, raw in entries:
         match = _NAME_TOKEN.match(raw.strip())
         if match and normalize_dependency_name(match.group(0)) == normalized_name:
             return source_file, line_number
-    return "requirements.txt", 1
+    return _deps_file_fallback(path)
 
 
 def _run_pip_audit(entries: list[tuple[str, int, str]]) -> list[dict] | None:
@@ -148,13 +204,55 @@ def _top_level_imports(path: Path) -> set[str]:
     return {normalize_dependency_name(name) for name in names}
 
 
-def _local_top_level_names(path: Path) -> set[str]:
+def _scan_dir_for_modules(directory: Path) -> set[str]:
     names: set[str] = set()
-    for child in path.iterdir():
+    if not directory.is_dir():
+        return names
+    for child in directory.iterdir():
         if child.is_dir() and (child / "__init__.py").is_file():
             names.add(normalize_dependency_name(child.name))
         elif child.is_file() and child.suffix == ".py":
             names.add(normalize_dependency_name(child.stem))
+    return names
+
+
+def _declared_project_names(path: Path) -> set[str]:
+    data = read_pyproject_toml(path)
+    candidates = (
+        data.get("project", {}).get("name"),
+        data.get("tool", {}).get("poetry", {}).get("name"),
+    )
+    return {normalize_dependency_name(str(name)) for name in candidates if name}
+
+
+def _local_top_level_names(path: Path) -> set[str]:
+    """Incluye el layout src/: con `src/<paquete>/` el paquete propio del repo no
+    es visible iterando solo la raiz, y termina reportado como import no
+    declarado - un NO_SOSTENIBLE falso contra el propio codigo del repo."""
+    return (
+        _scan_dir_for_modules(path)
+        | _scan_dir_for_modules(path / "src")
+        | _declared_project_names(path)
+    )
+
+
+def _transitive_pins(path: Path) -> set[str]:
+    """Un comentario `# via X` es la marca que dejan pip-compile y los
+    requirements.txt anotados para las dependencias transitivas. No son deps
+    directas del repo, asi que "declarada pero no se usa" para ellas es ruido:
+    el archivo mismo ya dice quien las arrastra."""
+    req_file = path / "requirements.txt"
+    if not req_file.is_file():
+        return set()
+
+    names: set[str] = set()
+    for line in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not _VIA_COMMENT.search(stripped):
+            continue
+        match = _NAME_TOKEN.match(stripped)
+        if match:
+            names.add(normalize_dependency_name(match.group(0)))
     return names
 
 
@@ -178,7 +276,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         if not vulns:
             continue
         normalized_name = normalize_dependency_name(dep.get("name", ""))
-        source_file, line_number = _locate(entries, normalized_name)
+        source_file, line_number = _locate(entries, normalized_name, ctx.path)
         vuln_ids = ", ".join(sorted({v["id"] for v in vulns}))
         evidence.append(
             Evidence(
@@ -192,6 +290,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         )
         escalate(Verdict.NO_SOSTENIBLE)
 
+    undeclared_file, undeclared_line = _deps_file_fallback(ctx.path)
     used_imports = _top_level_imports(ctx.path)
     local_names = _local_top_level_names(ctx.path)
     stdlib_names = {normalize_dependency_name(name) for name in sys.stdlib_module_names}
@@ -205,7 +304,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
             normalize_dependency_name(mapped_package) if mapped_package else None
         )
         if mapped_normalized and mapped_normalized in ctx.declared_dependencies:
-            source_file, line_number = _locate(entries, mapped_normalized)
+            source_file, line_number = _locate(entries, mapped_normalized, ctx.path)
             evidence.append(
                 Evidence(
                     file=source_file,
@@ -217,11 +316,24 @@ def verify(ctx: RepoContext) -> VerifierResult:
                 )
             )
             escalate(Verdict.APROBADO_CON_OBSERVACIONES)
+        elif module_name in _CLI_ONLY_PACKAGES:
+            evidence.append(
+                Evidence(
+                    file=undeclared_file,
+                    line=undeclared_line,
+                    note=(
+                        f"'{module_name}' se importa sin declarar, pero es una herramienta "
+                        "de build/automatizacion: tiene que estar instalada por fuera del "
+                        "proyecto para poder correr el script que la invoca"
+                    ),
+                )
+            )
+            escalate(Verdict.APROBADO_CON_OBSERVACIONES)
         else:
             evidence.append(
                 Evidence(
-                    file="requirements.txt" if entries else "pyproject.toml",
-                    line=1,
+                    file=undeclared_file,
+                    line=undeclared_line,
                     note=(
                         f"'{module_name}' se importa en el codigo pero no esta declarado "
                         "en requirements.txt/pyproject.toml"
@@ -235,8 +347,11 @@ def verify(ctx: RepoContext) -> VerifierResult:
         for imp, pkg in _KNOWN_IMPORT_TO_PACKAGE.items()
         if imp in used_imports
     }
+    no_reportables = _transitive_pins(ctx.path) | _CLI_ONLY_PACKAGES
     for normalized_name in sorted(ctx.declared_dependencies - effectively_used):
-        source_file, line_number = _locate(entries, normalized_name)
+        if normalized_name in no_reportables:
+            continue
+        source_file, line_number = _locate(entries, normalized_name, ctx.path)
         evidence.append(
             Evidence(
                 file=source_file,

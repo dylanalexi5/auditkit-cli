@@ -128,3 +128,111 @@ def test_verify_clean_repo_is_aprobado(tmp_path: Path) -> None:
 
     assert result.verdict == Verdict.APROBADO
     assert result.evidence == []
+
+
+def test_verify_without_dependency_files_does_not_cite_a_path(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("import totally_undeclared_thing\n")
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    for item in result.evidence:
+        assert item.file == deps_check._NO_DEPS_FILE, (
+            f"la evidencia cita '{item.file}', que no existe en el repo"
+        )
+
+
+def test_verify_does_not_cite_requirements_txt_when_repo_has_none(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\n'
+        'name = "fixture"\n'
+        'version = "0.0.1"\n'
+        'dependencies = ["peppercorn"]\n'
+        '[project.optional-dependencies]\n'
+        'dev = ["check-manifest"]\n'
+    )
+    (tmp_path / "app.py").write_text("import totally_undeclared_thing\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    for item in result.evidence:
+        assert (tmp_path / item.file).is_file(), (
+            f"la evidencia cita '{item.file}', que no existe en el repo"
+        )
+
+
+def test_verify_src_layout_own_package_is_not_undeclared(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    pkg = tmp_path / "src" / "mypkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("def suma(a, b):\n    return a + b\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_suma.py").write_text(
+        "from mypkg import suma\n\n\ndef test_suma():\n    assert suma(1, 1) == 2\n"
+    )
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_transitive_pin_with_via_comment_is_not_flagged_as_unused(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "requirements.txt").write_text(
+        "click>=8.0\nattrs==25.3.0          # via click\n"
+    )
+    (tmp_path / "app.py").write_text("import click\n\nclick.echo('hi')\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_cli_only_dependency_is_not_flagged_as_unused(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("ruff>=0.6\ncoverage>=7.0\nnox>=2024.4.15\n")
+    (tmp_path / "app.py").write_text("print('hola')\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_undeclared_build_tool_import_is_observaciones(tmp_path: Path) -> None:
+    """noxfile.py importa nox sin declararlo: es la forma de pypa/sampleproject.
+    No es un repo roto, pero sigue siendo un dato a revisar - correr ese script
+    exige instalar nox aparte."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    (tmp_path / "noxfile.py").write_text(
+        "import nox\n\n\n@nox.session\ndef tests(session):\n    session.run('pytest')\n"
+    )
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert any(
+        "nox" in item.note and "herramienta" in item.note for item in result.evidence
+    ), f"se esperaba una observación explicando por qué nox no está declarado: {result.evidence}"
+
+
+def test_verify_undeclared_unknown_import_is_still_no_sostenible(tmp_path: Path) -> None:
+    """Guarda: la excepción es solo para herramientas de build conocidas."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    (tmp_path / "app.py").write_text("import totally_undeclared_thing\n")
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE

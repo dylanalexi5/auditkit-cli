@@ -57,6 +57,7 @@ basta), no motor de reportes (markdown armado a mano desde los
 |---|---|
 | Vulnerabilidad real conocida (pip-audit, paquete declarado) | `NO_SOSTENIBLE` |
 | Import usado sin declarar, con mapeo conocido import↔paquete | `APROBADO_CON_OBSERVACIONES` |
+| Import usado sin declarar, de herramienta de build/automatización (`nox`, `tox`…) | `APROBADO_CON_OBSERVACIONES` |
 | Import usado sin declarar, sin mapeo conocido | `NO_SOSTENIBLE` |
 | Paquete declarado pero no usado en el código | `APROBADO_CON_OBSERVACIONES` |
 
@@ -76,6 +77,79 @@ orchestrator aplicará entre verificadores).
 Estos son los casos más comunes donde el nombre de import y el nombre del
 paquete en PyPI divergen. La lista se amplía cuando aparezca un caso real,
 no se intenta cubrir todos los mismatches posibles del ecosistema.
+
+### Qué NO se reporta como "declarado pero no se usa"
+
+Tres clases de falso positivo detectadas corriendo el auditor contra repos
+públicos ajenos (`pypa/sampleproject`, `anxolerd/dvpwa`) y contra sí mismo:
+
+| Caso | Por qué no es un hallazgo |
+|---|---|
+| Paquete propio del repo en `src/<nombre>/` | Es el código del repo, no una dependencia. `_local_top_level_names()` escanea la raíz **y** `src/`, más el `name` declarado en `[project]`/`[tool.poetry]`. Sin esto el repo se reporta a sí mismo como import no declarado — un `NO_SOSTENIBLE` falso. |
+| Pin transitivo anotado `# via X` | Marca que dejan `pip-compile` y los `requirements.txt` anotados. El archivo mismo declara quién arrastra la dependencia; no es una dep directa que el código deba importar. |
+| Paquete de herramienta CLI (`ruff`, `coverage`, `nox`, `pytest`, `pip-audit`…) | Se invocan como comando, nunca se importan. Buscar su `import` y no encontrarlo no prueba nada. Lista abierta en `_CLI_ONLY_PACKAGES`. |
+
+Las tres son exclusiones deliberadamente conservadoras: solo suprimen
+observaciones (`APROBADO_CON_OBSERVACIONES`) o un `NO_SOSTENIBLE` que era
+falso por construcción. Ninguna suprime una vulnerabilidad real de pip-audit.
+
+### Herramientas de build/automatización importadas sin declarar
+
+`nox`, `tox` y `make` son herramientas de automatización: para que el script
+que las invoca pueda correr, tienen que estar instaladas **antes** que el
+proyecto y por fuera de él. Un `noxfile.py` con `import nox`, o un `tox.ini`,
+describen cómo se automatiza el repo — no son código de la aplicación, y su
+herramienta no es una dependencia de runtime que el repo deba declarar en
+`requirements.txt`/`pyproject.toml`. `pypa/sampleproject`, el ejemplo canónico
+de la Python Packaging Authority, tiene exactamente esa forma: `noxfile.py`
+importa `nox` y `nox` no está declarado en ningún lado.
+
+Es el mismo tratamiento que `ruff`, `coverage` y `check-manifest`, con la
+única diferencia de la dirección en que aparecen: aquellos suelen estar
+declarados y no importarse, mientras que `nox`/`tox` suelen importarse sin
+estar declarados. Ambas direcciones consultan la misma lista abierta,
+`_CLI_ONLY_PACKAGES`.
+
+**Veredicto: `APROBADO_CON_OBSERVACIONES`, no `APROBADO`.** Un import sin
+declarar sigue siendo un dato que quien lee el reporte debería ver — que la
+herramienta sea de build explica por qué no está declarada, no borra el
+hecho de que correr ese script requiere instalarla aparte. Lo que deja de
+ser es `NO_SOSTENIBLE`: no es un repo roto.
+
+`make` se documenta acá por completitud del criterio, pero no aparece en la
+lista: no es un paquete de PyPI y no existe `import make`, así que nunca
+llega a este verificador.
+
+## Veredictos de build_check.py: "no verificado" vs. "corridos y fallaron"
+
+`APROBADO` de `build_check` no significa siempre lo mismo, y la diferencia
+importa: un veredicto blando porque *no pudimos comprobar* no es lo mismo que
+uno porque *comprobamos y está bien*. Estados exactos:
+
+| Situación | Veredicto | ¿Se corrió pytest? | Significado |
+|---|---|---|---|
+| Sin `pyproject.toml` / `setup.py` / `setup.cfg` | `APROBADO` | **No** | **No verificado.** No se detectó proyecto Python, no se ejecutó nada. |
+| `pytest` termina con exit 0 | `APROBADO` | Sí | **Verificado: los tests corrieron y pasaron.** |
+| `ModuleNotFoundError` de un paquete declarado en `requirements.txt`/`pyproject.toml` | `APROBADO_CON_OBSERVACIONES` | Sí, falló al importar | **No verificado.** Falta una dependencia externa que deliberadamente no instalamos; no es un fallo del repo. |
+| `pytest` falla por cualquier otra causa | `NO_SOSTENIBLE` | Sí | **Verificado: los tests corrieron y fallaron.** |
+
+El `ModuleNotFoundError` del **paquete propio del repo** ya no cae en ninguna
+de estas filas: `_pytest_env()` agrega la raíz y `src/` al `PYTHONPATH` antes
+de correr pytest, así que el paquete del repo es importable sin instalarlo.
+Antes de eso, cualquier repo con layout `src/` (incluido `pypa/sampleproject`,
+cuya suite pasa perfectamente) se reportaba `NO_SOSTENIBLE` sin estar roto.
+
+Se descartó `pip install -e .` para lograrlo: instalar el repo ejecuta su
+build backend — código del repo auditado, la misma clase de RCE que este ADR
+ya documenta — y además resuelve y descarga sus dependencias externas. Extender
+`PYTHONPATH` cubre el paquete propio sin ejecutar nada extra ni tocar la red.
+
+**Limitación que queda abierta:** la primera fila de la tabla sigue
+devolviendo `APROBADO` para "no verificado", igual que la segunda para
+"verificado y pasó". El reporte no distingue ambos casos hoy. Es la misma
+confusión que `deps_check._run_pip_audit()` sí evita (devuelve `None` para "no
+se pudo verificar", distinto de `[]` para "verificado, limpio"). Queda
+registrada acá como deuda conocida, no como comportamiento deseado.
 
 ## Limitaciones conocidas
 
@@ -104,7 +178,9 @@ no se intenta cubrir todos los mismatches posibles del ecosistema.
   hasta que se pida.
 - **`build_check.py` nunca instala las dependencias del repo auditado.**
   Corre `pytest` en el entorno del propio auditor, sin `pip install` previo
-  del repo clonado. Por eso no puede detectar fallos que solo aparecen con
+  del repo clonado. Sí hace importable el paquete propio del repo vía
+  `PYTHONPATH` (raíz + `src/`), que no requiere instalar ni ejecutar nada —
+  ver la tabla de veredictos arriba. Por eso no puede detectar fallos que solo aparecen con
   las librerías reales instaladas (bugs de integración, versiones
   incompatibles) — solo detecta si un import falla o no. Para mitigar el
   falso negativo más obvio (marcar como roto un repo sano solo porque no
