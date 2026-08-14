@@ -38,6 +38,22 @@ def test_from_path_parses_poetry_dependencies(tmp_path: Path) -> None:
     assert ctx.declared_dependencies == {"fastapi", "pydantic_settings", "pytest"}
 
 
+def test_from_path_parses_dependency_groups(tmp_path: Path) -> None:
+    """PEP 735 [dependency-groups] - pallets/click declara asi sus deps de
+    docs (pallets-sphinx-themes, sphinx...) en vez de
+    [project.optional-dependencies]. Una entrada {"include-group": "..."}
+    referencia otro grupo, no un paquete - se ignora, no tiene nombre real."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[dependency-groups]\n"
+        'dev = ["ruff", "tox"]\n'
+        'docs = ["myst-parser", "pallets-sphinx-themes", {include-group = "dev"}]\n'
+    )
+
+    ctx = RepoContext.from_path(tmp_path)
+
+    assert ctx.declared_dependencies == {"ruff", "tox", "myst_parser", "pallets_sphinx_themes"}
+
+
 def test_from_path_survives_malformed_pyproject_toml(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("this is not [ valid toml")
     (tmp_path / "requirements.txt").write_text("click>=8.0\n")

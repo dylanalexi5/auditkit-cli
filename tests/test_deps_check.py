@@ -7,6 +7,59 @@ from auditor.core.repo_context import RepoContext
 from auditor.verifiers import deps_check
 
 
+def test_verify_ignores_fake_imports_in_test_fixture_files(tmp_path: Path) -> None:
+    """Reproduce psf/black tests/data/cases/*.py: archivos .py reales cuyo
+    CONTENIDO es codigo de ejemplo usado como input de un formateador, con
+    imports inventados (import foo/hello) que no son dependencias de nadie."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    fixtures_dir = tmp_path / "tests" / "data" / "cases"
+    fixtures_dir.mkdir(parents=True)
+    (fixtures_dir / "collections.py").write_text("import foo\nimport hello\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_ignores_imports_inside_type_checking_guard(tmp_path: Path) -> None:
+    """Reproduce pallets/click: `if t.TYPE_CHECKING: import typing_extensions`
+    en src/click/core.py - nunca corre en runtime, no es una dependencia."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    (tmp_path / "app.py").write_text(
+        "import typing as t\n\nif t.TYPE_CHECKING:\n    import typing_extensions\n"
+    )
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_still_reports_undeclared_import_outside_type_checking(
+    tmp_path: Path,
+) -> None:
+    """El guard TYPE_CHECKING no debe volverse una forma de esconder un
+    import real sin declarar - solo lo que esta genuinamente adentro del
+    guard se ignora."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    (tmp_path / "app.py").write_text("import totally_undeclared_thing\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    assert any("totally_undeclared_thing" in e.note for e in result.evidence)
+
+
 def test_extract_requirements_rejects_vcs_and_url_lines(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text(
         "click>=8.0\n"

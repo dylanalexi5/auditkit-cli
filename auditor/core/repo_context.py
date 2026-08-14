@@ -53,6 +53,20 @@ def _parse_pyproject_toml(path: Path) -> set[str]:
             if match:
                 names.add(normalize_dependency_name(match.group(0)))
 
+    # PEP 735 - [dependency-groups], tabla top-level (no bajo [project]). Cada
+    # entrada de una lista es un string "name>=version" o un dict
+    # {"include-group": "otro-grupo"} (referencia a otro grupo, no un
+    # paquete) - se ignoran esos, no tienen nombre de paquete que extraer.
+    # pallets/click declara asi sus deps de docs (pallets-sphinx-themes,
+    # sphinx...) en vez de [project.optional-dependencies].
+    for group_deps in data.get("dependency-groups", {}).values():
+        for dep in group_deps:
+            if not isinstance(dep, str):
+                continue
+            match = _NAME_TOKEN.match(dep.strip())
+            if match:
+                names.add(normalize_dependency_name(match.group(0)))
+
     # Poetry - tabla { name = "version" | {version=..., extras=...} }, no lista de strings
     poetry = data.get("tool", {}).get("poetry", {})
     for name in poetry.get("dependencies", {}):
