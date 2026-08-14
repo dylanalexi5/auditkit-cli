@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from auditor.core.models import Verdict
 from auditor.core.repo_context import RepoContext
 from auditor.verifiers import secrets
@@ -75,7 +77,123 @@ def test_verify_ignores_notebook_metadata_but_detects_secret_in_cell(
     assert result.verdict == Verdict.NO_SOSTENIBLE
     assert len(result.evidence) == 1
     assert result.evidence[0].file == "notebook.ipynb"
+    assert result.evidence[0].line == 1
     assert "AWS" in result.evidence[0].note
+
+
+def test_verify_notebook_secret_reports_the_real_cell_index(tmp_path: Path) -> None:
+    notebook = {
+        "cells": [
+            {"cell_type": "markdown", "metadata": {}, "source": ["intro\n"]},
+            {"cell_type": "code", "metadata": {}, "source": ["x = 1\n"], "outputs": []},
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "source": ['AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'],
+                "outputs": [],
+            },
+        ]
+    }
+    (tmp_path / "notebook.ipynb").write_text(json.dumps(notebook))
+
+    result = secrets.verify(RepoContext(path=tmp_path))
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].line == 3
+
+
+def test_verify_notebook_handles_string_source_not_just_list(tmp_path: Path) -> None:
+    """nbformat permite `source` como lista de lineas O como un string suelto
+    - las dos formas son validas."""
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "source": 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n',
+                "outputs": [],
+            }
+        ]
+    }
+    (tmp_path / "notebook.ipynb").write_text(json.dumps(notebook))
+
+    result = secrets.verify(RepoContext(path=tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    assert "AWS" in result.evidence[0].note
+
+
+def test_verify_notebook_skips_empty_cells_and_finds_secret_later(tmp_path: Path) -> None:
+    notebook = {
+        "cells": [
+            {"cell_type": "code", "metadata": {}, "source": [], "outputs": []},
+            {"cell_type": "code", "metadata": {}, "source": ["   \n"], "outputs": []},
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "source": ['AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'],
+                "outputs": [],
+            },
+        ]
+    }
+    (tmp_path / "notebook.ipynb").write_text(json.dumps(notebook))
+
+    result = secrets.verify(RepoContext(path=tmp_path))
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].line == 3
+
+
+def test_verify_survives_malformed_notebook_json(tmp_path: Path) -> None:
+    (tmp_path / "broken.ipynb").write_text("{not valid json")
+    (tmp_path / "app.py").write_text("def main() -> None:\n    pass\n")
+
+    result = secrets.verify(RepoContext(path=tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_verify_continues_scanning_notebooks_after_an_excluded_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El orden real de Path.rglob() no esta garantizado - se fuerza a mano
+    para que el excluido se visite ANTES que el real. Si _scan_notebooks
+    usara `break` en vez de `continue` al toparse con el excluido, esta es
+    la unica forma de que el test lo note de manera confiable."""
+    cache_dir = tmp_path / ".pytest_cache"
+    cache_dir.mkdir()
+    excluded = cache_dir / "generated.ipynb"
+    excluded.write_text(
+        json.dumps({"cells": [{"cell_type": "code", "source": ["import os\n"]}]})
+    )
+    real = tmp_path / "real.ipynb"
+    real.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "source": ['AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'],
+                    }
+                ]
+            }
+        )
+    )
+
+    original_rglob = Path.rglob
+
+    def ordered_rglob(self: Path, pattern: str):
+        if self == tmp_path and pattern == "*.ipynb":
+            return iter([excluded, real])
+        return original_rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", ordered_rglob)
+
+    result = secrets.verify(RepoContext(path=tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    assert any(e.file == "real.ipynb" for e in result.evidence)
 
 
 def test_verify_ignores_artifacts_generated_by_the_auditor(tmp_path: Path) -> None:
