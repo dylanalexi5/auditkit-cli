@@ -83,6 +83,20 @@ def parse_declared_dependencies(path: Path) -> frozenset[str]:
     return frozenset(_parse_requirements_txt(path) | _parse_pyproject_toml(path))
 
 
+def declared_project_names(path: Path) -> frozenset[str]:
+    """El/los nombre(s) que el propio repo declara para si mismo (PEP 621 o
+    Poetry). Compartido entre deps_check.py (no reportar el paquete propio
+    como import no declarado) y semantic_check.py (no cruzar por el nombre
+    del proyecto, que aparece en casi cualquier afirmacion sobre si mismo -
+    ver ADR 0002)."""
+    data = read_pyproject_toml(path)
+    candidates = (
+        data.get("project", {}).get("name"),
+        data.get("tool", {}).get("poetry", {}).get("name"),
+    )
+    return frozenset(normalize_dependency_name(str(name)) for name in candidates if name)
+
+
 @dataclass(frozen=True)
 class RepoContext:
     path: Path

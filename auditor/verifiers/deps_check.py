@@ -9,7 +9,12 @@ import tomllib
 from pathlib import Path
 
 from auditor.core.models import Evidence, Verdict, VerifierResult, worst_verdict
-from auditor.core.repo_context import RepoContext, normalize_dependency_name, read_pyproject_toml
+from auditor.core.repo_context import (
+    RepoContext,
+    declared_project_names,
+    normalize_dependency_name,
+    read_pyproject_toml,
+)
 
 _TIMEOUT_SECONDS = 120
 _VULN_SCAN_TIMEOUT_NOTE = (
@@ -272,15 +277,6 @@ def _scan_dir_for_modules(directory: Path) -> set[str]:
     return names
 
 
-def _declared_project_names(path: Path) -> set[str]:
-    data = read_pyproject_toml(path)
-    candidates = (
-        data.get("project", {}).get("name"),
-        data.get("tool", {}).get("poetry", {}).get("name"),
-    )
-    return {normalize_dependency_name(str(name)) for name in candidates if name}
-
-
 def _local_top_level_names(path: Path) -> set[str]:
     """Incluye el layout src/: con `src/<paquete>/` el paquete propio del repo no
     es visible iterando solo la raiz, y termina reportado como import no
@@ -288,7 +284,7 @@ def _local_top_level_names(path: Path) -> set[str]:
     return (
         _scan_dir_for_modules(path)
         | _scan_dir_for_modules(path / "src")
-        | _declared_project_names(path)
+        | set(declared_project_names(path))
     )
 
 

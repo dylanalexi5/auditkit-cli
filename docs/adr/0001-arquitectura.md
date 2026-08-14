@@ -120,6 +120,26 @@ ser es `NO_SOSTENIBLE`: no es un repo roto.
 lista: no es un paquete de PyPI y no existe `import make`, así que nunca
 llega a este verificador.
 
+### Falsos positivos encontrados contra pallets/click y psf/black
+
+Tres clases más, encontradas auditando dos repos externos reales y grandes
+(no toy repos):
+
+| Caso | Verificador | Por qué no es un hallazgo |
+|---|---|---|
+| `.pre-commit-config.yaml` | `secrets.py` | Cada hook declara `rev: <sha git de 40 hex>` ("frozen" a un commit) — es un hash de versión, no un secreto. Excluido por nombre de archivo. |
+| Metadata de `.ipynb` (hash de intérprete, uuid de celda estilo Kaggle) | `secrets.py` | detect-secrets no tiene plugin para notebooks. La metadata de Jupyter está llena de hex que parece secreto sin serlo — nunca la escribió un humano. Se sanitiza cada celda a un archivo temporal con solo su `source` antes de escanear; un secreto de verdad pegado en una celda de código sí se detecta. |
+| `import foo`/`import hello` en `tests/data/cases/*.py` | `deps_check.py` | Código de ejemplo usado como dato de entrada de un test (formateadores, parsers), no dependencias reales. `tests/data/` y `tests/fixtures/` (a cualquier profundidad) se excluyen del `ast` scan. |
+| Import dentro de `if TYPE_CHECKING:` | `deps_check.py` | Nunca corre en runtime, solo lo lee un type-checker. `_RuntimeImportVisitor` reconoce el guard (`Name` o `Attribute` terminado en `TYPE_CHECKING`, cualquier alias) y no desciende a su body. |
+| `[dependency-groups]` (PEP 735) sin leer | `deps_check.py`/`repo_context.py` | Tabla top-level nueva del ecosistema (`uv`, entre otros) para declarar grupos de deps — pallets/click la usa para sus deps de docs en vez de `[project.optional-dependencies]`. Agregada al parseo de `pyproject.toml`. |
+
+Mismo criterio que la sección anterior: exclusiones conservadoras, ninguna
+suprime una vulnerabilidad real ni un import genuinamente no declarado fuera
+de estos casos puntuales. Quedan hallazgos genuinos en ambos repos que no son
+bugs del auditor (un hash de ejemplo en un docstring de `black`, Pillow sin
+declarar en un script de `examples/` de `click`) — se reportan tal cual, no
+se suprimen.
+
 ## Veredictos de build_check.py: "no verificado" vs. "corridos y fallaron"
 
 `APROBADO` de `build_check` no significa siempre lo mismo, y la diferencia

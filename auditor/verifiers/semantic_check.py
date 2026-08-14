@@ -5,7 +5,7 @@ from pathlib import Path
 import groq
 
 from auditor.core.models import Evidence, Verdict, VerifierResult
-from auditor.core.repo_context import RepoContext
+from auditor.core.repo_context import RepoContext, declared_project_names
 from auditor.core.semantic_client import MissingApiKeyError, get_client
 
 _MODEL = "llama-3.3-70b-versatile"
@@ -17,6 +17,16 @@ _STOPWORDS = frozenset(
         "para", "esta", "este", "esto", "ested", "con", "que", "los", "las",
         "una", "uno", "por", "del", "the", "and", "this", "that", "with",
         "from", "have", "has", "was", "are", "your", "you",
+        # Vocabulario generico de las notas de evidencia que escribimos
+        # nosotros mismos - compartido entre los 4 verificadores. Sin esto,
+        # CUALQUIER afirmacion matchea CUALQUIER evidencia con solo compartir
+        # una de estas palabras ("version", "codigo"), sin relacion tematica
+        # real - la misma evidencia le pegaba a todas las afirmaciones.
+        "declarado", "declara", "declaradas", "declarados", "importa",
+        "import", "imports", "codigo", "code", "hay", "real", "version",
+        "versiones", "archivo", "archivos", "file", "files", "modulo",
+        "modulos", "module", "requirements", "toml", "txt", "pyproject",
+        "evidencia", "fallo", "verificado", "repo", "proyecto", "project",
     }
 )
 _UNAVAILABLE_NOTE_TEMPLATE = "verificador semántico saltado: {reason}"
@@ -92,8 +102,26 @@ def _extract_claims(client: groq.Groq, readme_text: str) -> list[dict] | None:
     ]
 
 
-def _keywords(text: str) -> set[str]:
-    return {token for token in _KEYWORD.findall(text.lower()) if token not in _STOPWORDS}
+def _keywords(text: str, exclude: frozenset[str] = frozenset()) -> set[str]:
+    return {
+        token
+        for token in _KEYWORD.findall(text.lower())
+        if token not in _STOPWORDS and token not in exclude
+    }
+
+
+def _project_name_tokens(path: Path) -> frozenset[str]:
+    """El nombre del propio proyecto ('black', 'click'...) tokenizado igual
+    que cualquier otro texto. Se excluye del cruce por la misma razon que el
+    vocabulario generico: aparece en casi cualquier afirmacion sobre el
+    repo ("_Black_ reformats...", "_Black_ is PEP 8...") y en evidencia que
+    no tiene nada que ver (ej. un modulo interno '_black_version' sin
+    declarar) - sin excluirlo, TODO matchea con TODO por compartir el
+    nombre del proyecto."""
+    tokens: set[str] = set()
+    for name in declared_project_names(path):
+        tokens.update(_KEYWORD.findall(name))
+    return frozenset(tokens)
 
 
 def _locate_quote(readme_text: str, quote: str) -> int:
@@ -104,13 +132,15 @@ def _locate_quote(readme_text: str, quote: str) -> int:
 
 
 def _find_contradicting_evidence(
-    claim_keywords: set[str], other_results: dict[str, VerifierResult]
+    claim_keywords: set[str],
+    other_results: dict[str, VerifierResult],
+    exclude: frozenset[str],
 ) -> Evidence | None:
     if not claim_keywords:
         return None
     for result in other_results.values():
         for item in result.evidence:
-            if claim_keywords & _keywords(item.note):
+            if claim_keywords & _keywords(item.note, exclude):
                 return item
     return None
 
@@ -132,11 +162,13 @@ def verify(ctx: RepoContext, other_results: dict[str, VerifierResult]) -> Verifi
     if not claims:
         return VerifierResult(verdict=Verdict.APROBADO, evidence=[])
 
+    exclude = _project_name_tokens(ctx.path)
     evidence: list[Evidence] = []
     for claim in claims:
         afirmacion = claim["afirmacion"]
         cita = claim["cita_textual_del_readme"]
-        contradicting = _find_contradicting_evidence(_keywords(afirmacion), other_results)
+        claim_keywords = _keywords(afirmacion, exclude)
+        contradicting = _find_contradicting_evidence(claim_keywords, other_results, exclude)
         if contradicting is None:
             continue
         evidence.append(

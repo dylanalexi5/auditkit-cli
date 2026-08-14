@@ -101,6 +101,29 @@ extraída, comparados por intersección de conjunto contra los tokens de cada
 intersección no vacía cuenta como "hay evidencia relacionada" — no hace
 falta nada más sofisticado para este MVP.
 
+**Bug real encontrado auditando psf/black:** el nombre del proyecto
+("black") aparece en casi cualquier afirmación extraída sobre sí mismo
+("_Black_ is...", "_Black_ has..."), y coincidía con evidencia de un módulo
+interno sin relación (`_black_version` sin declarar) — la misma evidencia le
+pegaba a **todas** las afirmaciones, sin importar el tema (hasta a "licencia
+MIT"). Dos causas, dos fixes:
+
+1. **Vocabulario genérico de nuestras propias notas.** Palabras como
+   "declarado", "versión", "código", "requirements" aparecen en casi
+   cualquier nota de evidencia sin aportar señal temática. Sumadas al
+   stopword list existente.
+2. **El nombre del propio proyecto no se excluía.** `declared_project_names()`
+   (movida a `repo_context.py`, compartida con `deps_check.py`) se tokeniza
+   igual que cualquier otro texto y se resta de ambos lados del cruce — de
+   la afirmación y de la evidencia. Sin esto, un proyecto llamado "black" (o
+   "django", "requests"...) hace que su propio nombre actúe como un
+   comodín que matchea cualquier cosa consigo mismo.
+
+Ninguno de los dos fixes agrega falsos negativos donde antes había una
+detección real: un match genuino (ej. "test coverage" en la afirmación
+contra "no hay funciones de test" en la evidencia) sigue funcionando — el
+fix solo saca del cruce las palabras que nunca aportaron señal real.
+
 ## Librería externa
 
 Ninguna nueva — reusa `auditor/core/semantic_client.py` y el SDK `groq`
