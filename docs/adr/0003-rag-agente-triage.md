@@ -428,6 +428,70 @@ se implementa tal como está especificado acá** — no es decoración:
   específicamente para medir eso antes de afirmar que "mejora" el reporte
   — no alcanza con que las piezas corran sin explotar.
 
+### Mutation testing de `triage_agent.py`
+
+`cosmic-ray`, 357 mutantes candidatos, 174 sobrevivientes en la primera
+vuelta. Cinco rondas hasta converger en **108 sobrevivientes, todos
+equivalentes** — descontándolos, 100% de los no equivalentes muertos.
+
+Gaps reales que encontró, más allá de los obvios:
+
+- **Dos aserciones tautológicas propias.** Los tests de tope de iteraciones
+  y de hallazgos comparaban `call_count` contra `MAX_ITERACIONES` /
+  `MAX_HALLAZGOS`: las mismas constantes que el mutante altera, así que
+  pasaban con cualquier valor. Es el mismo error ya encontrado y arreglado
+  en `semantic_check.py` — se volvió a colar, lo que sugiere que conviene
+  tratarlo como patrón a vigilar y no como incidente aislado.
+- **El span de una función se calculaba como `fin - inicio`**, y mutarlo por
+  `//`, `&` o `>>` hacía elegir la función equivocada en anidamientos
+  concretos. El fixture original (funciones en líneas 1-5) los dejaba pasar
+  por casualidad. Se buscaron por barrido exhaustivo sobre todos los
+  anidamientos válidos unas líneas que maten los tres a la vez (externa
+  4-11, interna 5-10: los spans mutados empatan y gana la externa) y se
+  confirmó aplicando los cuatro mutantes con `cosmic_ray.mutating`.
+- **El filtro de anotaciones por verificador** se probaba solo contra
+  `deps_check`, que ordena *antes* que `secrets` — no distinguía una
+  igualdad de una comparación de orden. Con `semantic_check` (ordena
+  después), la anotación de un verificador se pegaba sobre la evidencia de
+  otro.
+
+Los 108 equivalentes, cada uno verificado y no asumido: 99 son anotaciones
+`X | None` (PEP 649 las difiere, nunca se evalúan); `except OSError` en
+`_ruta_segura` (probado que `Path.resolve()` con `strict=False` no lanza en
+Windows ni con NUL, ni con 800 componentes, ni con `<>:|?*` — el guard se
+conserva porque en POSIX sí lanza ante un loop de symlinks, el ataque de la
+Mitigación 2); `continue`→`break` en `_duenio_del_docstring` (un `body`
+vacío solo existe en el módulo, y con el módulo vacío hay cero contenedores
+más); `fin - lineno` → `/` (la división preserva el orden, barrido
+exhaustivo sin contraejemplo); las tres de `span <` (los spans anidados son
+estrictamente decrecientes, cero empates posibles en todo el espacio de
+anidamientos); y las de `==` → `is` (mismos objetos de dict / enteros
+chicos cacheados) y `==` → `>=` (`propias` es subconjunto de `evidence`,
+así que `>=` solo puede ser True cuando son iguales).
+
+También destapó **código redundante**: el veredicto se calculaba con dos
+condiciones que juntas eran exactamente "algún hallazgo no se revisó". Se
+reemplazó por `todo_revisado and ninguno_real`, que dice lo mismo directo —
+el mutante equivalente desaparece de raíz en vez de quedar documentado.
+
+### Estado de la validación real (bloqueado por cuota)
+
+Los cinco `test_real_api_*` **no están verificados** contra el fix de `ast`:
+la cuota diaria de Groq (100k tokens/día) quedó agotada. Se documenta acá
+porque el modo de fallo era engañoso y vale la pena tenerlo escrito:
+
+Con la cuota agotada, `triage()` degrada con gracia y devuelve el hallazgo
+con su severidad original — es decir `NO_SOSTENIBLE`. Los dos tests que
+esperan justamente `NO_SOSTENIBLE` (credencial real, resistencia a
+inyección) **pasaban sin que el modelo hubiera opinado nada**: confianza
+falsa, peor que un fallo. Se agregó el fixture `groq_con_cuota`, que sondea
+la API antes de correr y salta el test si no hay cuota.
+
+La sonda usa el system prompt real a propósito: una primera versión con
+`max_tokens=3` reportó "cuota disponible" y los tests fallaron igual — una
+llamada de 10 tokens entra donde una de 618 no. El tamaño de la sonda tiene
+que ser representativo del payload real.
+
 ## Verificación
 
 - `pytest` sobre `rag_index.py` y `triage_agent.py` en aislamiento, con

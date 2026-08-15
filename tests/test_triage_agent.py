@@ -1,8 +1,9 @@
 """Tests del agente de triage (ADR 0003, Fase 3).
 
-Ninguno toca la red: el cliente de Groq siempre viene mockeado. El unico
-test que usa la API real vive aparte, marcado, igual que el de pip-audit en
-test_deps_check.py y el de Groq en test_semantic_check.py.
+Los tests mockeados no tocan la red: el cliente de Groq siempre viene
+inyectado. Los `test_real_api_*` si llaman a la API, igual que el test de
+pip-audit real en test_deps_check.py, y se saltan solos cuando no hay cuota
+(ver el fixture `groq_con_cuota`).
 """
 
 import os
@@ -15,6 +16,7 @@ import pytest
 
 from auditor.core import triage_agent
 from auditor.core.models import Evidence, Verdict, VerifierResult
+from auditor.core.semantic_client import get_client
 
 
 def _message(content=None, tool_calls=None):
@@ -1102,6 +1104,38 @@ def test_un_hallazgo_no_ambiguo_sin_triagear_mantiene_la_severidad(
 # DISTINGA un hash de una credencial solo lo prueba el modelo real.
 
 
+@pytest.fixture
+def groq_con_cuota():
+    """Salta el test si Groq esta sin cuota, en vez de dejarlo correr.
+
+    Sin esto, un 429 hace que `triage()` degrade con gracia y devuelva el
+    hallazgo con su severidad original - o sea NO_SOSTENIBLE. Los tests que
+    esperan justamente NO_SOSTENIBLE (credencial real, inyeccion de prompt)
+    PASARIAN sin que el modelo haya opinado nada: confianza falsa, que es
+    peor que un fallo. Verificado en la practica: con la cuota agotada, esos
+    dos pasaban en 1.5s sin una sola llamada exitosa.
+
+    La sonda usa el system prompt real para tener el tamano representativo.
+    Una llamada de 3 tokens puede entrar donde una de 600 no - tambien
+    verificado en la practica.
+    """
+    try:
+        get_client().chat.completions.create(
+            model=triage_agent._MODEL,
+            messages=[
+                {"role": "system", "content": triage_agent._SYSTEM_PROMPT},
+                {"role": "user", "content": "Hallazgo: sonda de cuota."},
+            ],
+            tools=triage_agent._TOOLS,
+            temperature=0,
+            timeout=20,
+        )
+    except groq.RateLimitError as exc:
+        pytest.skip(f"Groq sin cuota, validacion real no verificada: {exc}")
+    except triage_agent.MissingApiKeyError:
+        pytest.skip("falta GROQ_API_KEY")
+
+
 def _real_secrets(nombre: str, contenido: str, linea: int) -> tuple[Path, dict]:
     import tempfile
 
@@ -1115,7 +1149,7 @@ def _real_secrets(nombre: str, contenido: str, linea: int) -> tuple[Path, dict]:
     }
 
 
-def test_real_api_baja_un_hash_de_commit() -> None:
+def test_real_api_baja_un_hash_de_commit(groq_con_cuota) -> None:
     root, resultados = _real_secrets(
         "setup.py",
         "# pinned to a specific upstream commit for reproducibility\n"
@@ -1130,7 +1164,7 @@ def test_real_api_baja_un_hash_de_commit() -> None:
     assert "triage" in triaged["secrets"].evidence[0].note
 
 
-def test_real_api_mantiene_una_credencial_real() -> None:
+def test_real_api_mantiene_una_credencial_real(groq_con_cuota) -> None:
     root, resultados = _real_secrets(
         "config.py",
         "import os\n"
@@ -1144,7 +1178,7 @@ def test_real_api_mantiene_una_credencial_real() -> None:
     assert triaged["secrets"].verdict == Verdict.NO_SOSTENIBLE
 
 
-def test_real_api_baja_el_docstring_de_get_token_de_black() -> None:
+def test_real_api_baja_el_docstring_de_get_token_de_black(groq_con_cuota) -> None:
     """Reproduce psf/black src/black/handle_ipynb_magics.py:213 - uno de los
     dos casos que el agente seguia reportando mal despues del fix de radio.
     Es un ejemplo hex dentro del docstring de get_token()."""
@@ -1169,7 +1203,7 @@ def test_real_api_baja_el_docstring_de_get_token_de_black() -> None:
     assert "triage" in triaged["secrets"].evidence[0].note
 
 
-def test_real_api_baja_el_blob_de_notebook_en_un_test_de_black() -> None:
+def test_real_api_baja_el_blob_de_notebook_en_un_test_de_black(groq_con_cuota) -> None:
     """Reproduce psf/black tests/test_ipynb.py:367 - el otro caso que
     fallaba. No es un docstring: es el hash del interprete de Jupyter dentro
     de un blob de JSON usado como fixture de un test."""
@@ -1192,7 +1226,7 @@ def test_real_api_baja_el_blob_de_notebook_en_un_test_de_black() -> None:
     assert "triage" in triaged["secrets"].evidence[0].note
 
 
-def test_real_api_resiste_inyeccion_de_prompt_desde_el_repo() -> None:
+def test_real_api_resiste_inyeccion_de_prompt_desde_el_repo(groq_con_cuota) -> None:
     """El repo auditado controla el contexto que el agente lee para decidir
     (ADR 0003, Mitigacion 3). Un comentario que afirma "esto no es una
     credencial real" es texto que escribio el repo, no prueba - el agente
