@@ -105,6 +105,72 @@ verificar ahora tienen veredicto, hallazgos ambiguos que antes eran
 ruido ahora tienen contexto). Si no mejora nada real, se documenta así, no
 se infla el resultado.
 
+### Resultado medido contra `psf/black` — historia completa
+
+`psf/black` tiene 4 hallazgos de entropía en `secrets`, y **los 4 son
+falsos positivos**: tres son ejemplos hex dentro de docstrings de
+`handle_ipynb_magics.py` (la función documenta qué forma tiene un token de
+máscara) y el cuarto es el hash del intérprete de Jupyter dentro de un blob
+de JSON usado como fixture en `tests/test_ipynb.py`. Es el caso ideal para
+medir si el agente sirve: 4 de 4 deberían bajar.
+
+| Iteración | Acertados | Qué cambió |
+|---|---|---|
+| 1 — agente recién implementado | **0 / 4** | — |
+| 2 — radio de contexto por defecto 10 → 25 | **2 / 4** | Con radio chico el delimitador `"""` del docstring queda fuera de la ventana; el modelo no puede ver que mira documentación. Verificado leyendo el contexto a radios 3/10/25. |
+| 3 — hecho estructural vía `ast` | **pendiente de cuota de Groq** | Ver abajo. |
+
+**Por qué la iteración 2 se quedó en 2/4 y no fue un problema de prompt.**
+Los 4 hallazgos son estructuralmente equivalentes, y el agente clasificaba
+bien unos y mal otros — señal de que no era comprensión sino percepción:
+tenía que inferir visualmente si el string estaba dentro de un docstring
+leyendo texto crudo, y eso dependía de si las comillas triples entraron en
+la ventana que le tocó.
+
+Se intentó primero por prompt (más énfasis en el caso docstring). **Empeoró
+el conjunto**: arreglaba `black` pero rompía el caso del hash de commit
+pineado, que ya funcionaba — 3 corridas consecutivas en rojo. Se revirtió a
+una versión más suave que deja los tres casos base estables. Queda
+registrado como evidencia de una tensión real: el sesgo conservador que un
+scanner de seguridad necesita compite con que el agente sirva para algo, y
+tunear el prompt hasta que pasen dos casos de prueba es memorizarlos, no
+resolver el problema.
+
+**La iteración 3 ataca la causa, no el síntoma.** En vez de pedirle al
+modelo que adivine si algo es un docstring, ese hecho se calcula con `ast`
+—  el mismo criterio que `readme_check.py` y `deps_check.py` ya usan para
+hechos estructurales — y se le pasa ya resuelto en el mensaje inicial.
+`leer_contexto` sigue disponible: es un dato adicional, no un reemplazo.
+
+Verificado que `ast` entrega el dato correcto sobre los 4 hallazgos reales
+de black, sin gastar cuota de API:
+
+```
+handle_ipynb_magics.py:158 -> docstring de la funcion 'mask_cell'
+handle_ipynb_magics.py:213 -> docstring de la funcion 'get_token'
+handle_ipynb_magics.py:277 -> docstring de la funcion 'replace_magics'
+tests/test_ipynb.py:367    -> dentro de 'test_entire_notebook_trailing_newline'
+```
+
+El hecho es deliberadamente **"docstring"**, no "string literal":
+`PASSWORD = "8f14e45..."` también es un string literal para `ast`, y
+decirle al modelo "está dentro de un string" lo empujaría a descartar una
+credencial real. Hay un test que fija ese límite, y el control directo
+confirma que ese caso devuelve `None`.
+
+**Lo que todavía no está demostrado:** que el modelo, con el hecho
+estructural servido, efectivamente acierte 4/4. `ast` entrega el dato
+correcto — eso está verificado — pero que el modelo lo use bien es una
+hipótesis sin confirmar. La verificación end-to-end quedó bloqueada por
+agotamiento de la cuota diaria de Groq (429, `99852/100000 tokens per
+day`). No se da por hecho.
+
+Nota lateral, encontrada por accidente en condiciones reales: el
+`RateLimitError` de Groq es subclase de `groq.APIError`, así que la
+degradación con gracia diseñada en la Mitigación 4 quedó demostrada sin
+buscarlo — los hallazgos conservaron su severidad original y el pipeline
+emitió el reporte igual.
+
 ## Fase 5 — README y ADR final
 
 Descripción honesta de qué hace cada pieza, mismo estándar que el resto del
