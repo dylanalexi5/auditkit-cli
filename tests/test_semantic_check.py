@@ -109,6 +109,54 @@ def test_extract_claims_calls_api_with_expected_params() -> None:
     assert kwargs["response_format"] == {"type": "json_object"}
 
 
+def test_verify_does_not_match_unrelated_claims_via_project_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduce el bug real en psf/black: 'black' (nombre del proyecto)
+    aparece en casi cualquier afirmacion sobre si mismo ("_Black_ is...",
+    "_Black_ has...") y coincidia con evidencia de un modulo interno sin
+    relacion ('_black_version' sin declarar) - la misma evidencia le pegaba
+    a TODAS las afirmaciones, sin importar el tema."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "black"\n')
+    (tmp_path / "README.md").write_text(
+        "# demo\n\n_Black_ is licensed under MIT.\n\n_Black_ has complete test coverage.\n"
+    )
+    content = _claims_payload(
+        ("Black is licensed under MIT", "_Black_ is licensed under MIT."),
+        ("Black has complete test coverage", "_Black_ has complete test coverage."),
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(
+                    file="pyproject.toml",
+                    line=1,
+                    note=(
+                        "'_black_version' se importa en el codigo pero no esta "
+                        "declarado en requirements.txt/pyproject.toml"
+                    ),
+                )
+            ],
+        ),
+        "readme_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(file="README.md", line=5, note="no hay funciones de test en el repo")
+            ],
+        ),
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert len(result.evidence) == 1
+    assert "test coverage" in result.evidence[0].note
+    assert "MIT" not in result.evidence[0].note
+
+
 def test_verify_contradicting_evidence_is_observaciones(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

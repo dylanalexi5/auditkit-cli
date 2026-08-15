@@ -1,4 +1,5 @@
 import ast
+import itertools
 import json
 import re
 import subprocess
@@ -8,7 +9,12 @@ import tomllib
 from pathlib import Path
 
 from auditor.core.models import Evidence, Verdict, VerifierResult, worst_verdict
-from auditor.core.repo_context import RepoContext, normalize_dependency_name, read_pyproject_toml
+from auditor.core.repo_context import (
+    RepoContext,
+    declared_project_names,
+    normalize_dependency_name,
+    read_pyproject_toml,
+)
 
 _TIMEOUT_SECONDS = 120
 _VULN_SCAN_TIMEOUT_NOTE = (
@@ -189,18 +195,73 @@ def _run_pip_audit(entries: list[tuple[str, int, str]]) -> list[dict] | None:
         return None
 
 
+_TEST_FIXTURE_DIR_NAMES = frozenset({"tests", "test"})
+_TEST_FIXTURE_SUBDIR_NAMES = frozenset({"data", "fixtures"})
+
+
+def _is_test_fixture_path(relative_parts: tuple[str, ...]) -> bool:
+    """tests/data/ y tests/fixtures/ (a cualquier profundidad debajo) son la
+    convencion del ecosistema para guardar codigo de ejemplo usado COMO DATO
+    de un test, no codigo real del proyecto. psf/black tiene una carpeta
+    entera, tests/data/cases/, con archivos .py que son literalmente input
+    de prueba para el formateador - contienen `import foo`, `import hello`,
+    nombres inventados a proposito, y el ast scan los leia como si fueran
+    dependencias reales del propio black."""
+    lowered = [part.lower() for part in relative_parts]
+    return any(
+        a in _TEST_FIXTURE_DIR_NAMES and b in _TEST_FIXTURE_SUBDIR_NAMES
+        for a, b in itertools.pairwise(lowered)
+    )
+
+
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` / `if t.TYPE_CHECKING:`
+    (cualquier alias) - el body nunca corre en runtime, un type-checker lo lee
+    y nada mas. pallets/click hace exactamente esto con typing_extensions:
+    `if t.TYPE_CHECKING: import typing_extensions` en varios modulos - nunca
+    es una dependencia de runtime, pero un ast.walk() ciego a la estructura
+    no distingue esto de un import real."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
+
+
+class _RuntimeImportVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_If(self, node: ast.If) -> None:
+        if _is_type_checking_guard(node.test):
+            # El body es solo para type-checkers - no se visita. El else (si
+            # existe, ej. un fallback en runtime) si es codigo real.
+            for stmt in node.orelse:
+                self.visit(stmt)
+            return
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self.names.update(alias.name.split(".")[0] for alias in node.names)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module and node.level == 0:
+            self.names.add(node.module.split(".")[0])
+
+
 def _top_level_imports(path: Path) -> set[str]:
     names: set[str] = set()
     for py_file in path.rglob("*.py"):
+        relative_parts = py_file.relative_to(path).parts
+        if _is_test_fixture_path(relative_parts):
+            continue
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8", errors="ignore"))
         except SyntaxError:
             continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                names.add(node.module.split(".")[0])
+        visitor = _RuntimeImportVisitor()
+        visitor.visit(tree)
+        names.update(visitor.names)
     return {normalize_dependency_name(name) for name in names}
 
 
@@ -216,15 +277,6 @@ def _scan_dir_for_modules(directory: Path) -> set[str]:
     return names
 
 
-def _declared_project_names(path: Path) -> set[str]:
-    data = read_pyproject_toml(path)
-    candidates = (
-        data.get("project", {}).get("name"),
-        data.get("tool", {}).get("poetry", {}).get("name"),
-    )
-    return {normalize_dependency_name(str(name)) for name in candidates if name}
-
-
 def _local_top_level_names(path: Path) -> set[str]:
     """Incluye el layout src/: con `src/<paquete>/` el paquete propio del repo no
     es visible iterando solo la raiz, y termina reportado como import no
@@ -232,7 +284,7 @@ def _local_top_level_names(path: Path) -> set[str]:
     return (
         _scan_dir_for_modules(path)
         | _scan_dir_for_modules(path / "src")
-        | _declared_project_names(path)
+        | set(declared_project_names(path))
     )
 
 
