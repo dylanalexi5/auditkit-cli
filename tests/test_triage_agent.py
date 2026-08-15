@@ -250,7 +250,10 @@ def test_agente_para_al_llegar_al_maximo_de_iteraciones(tmp_path: Path) -> None:
 
     triaged = triage_agent.triage(tmp_path, resultados, client=client)
 
-    assert client.chat.completions.create.call_count == triage_agent.MAX_ITERACIONES
+    # Literal 3, no triage_agent.MAX_ITERACIONES: comparar contra la misma
+    # constante que el mutante altera es tautologico - el test pasaria con
+    # cualquier valor. Mismo error ya encontrado en semantic_check.py.
+    assert client.chat.completions.create.call_count == 3
     assert triaged["secrets"].verdict == Verdict.NO_SOSTENIBLE
 
 
@@ -293,7 +296,7 @@ def test_se_respeta_el_tope_de_hallazgos_por_corrida(tmp_path: Path) -> None:
 
     triaged = triage_agent.triage(tmp_path, resultados, client=client)
 
-    assert client.chat.completions.create.call_count == triage_agent.MAX_HALLAZGOS
+    assert client.chat.completions.create.call_count == 10  # literal, no la constante
     assert len(triaged["secrets"].evidence) == len(demasiados), "no se pierde ninguno"
 
 
@@ -573,6 +576,524 @@ def test_el_hecho_estructural_se_le_pasa_al_modelo(tmp_path: Path) -> None:
     inicial = next(m for m in mensajes if m["role"] == "user")
     assert "docstring" in inicial["content"].lower()
     assert "get_token" in inicial["content"]
+
+
+# --- Mutation-testing hardening -------------------------------------------
+# Gaps reales encontrados corriendo cosmic-ray sobre triage_agent.py
+# (357 mutantes candidatos, 174 sobrevivientes en la primera vuelta).
+#
+# Equivalentes documentados, verificados empiricamente - NO asumidos:
+#
+#   - Anotaciones de retorno/parametro `X | None` (lineas 151, 161, 193,
+#     212, 272, 287, 297, 392). Python 3.14 difiere la evaluacion de
+#     anotaciones (PEP 649): mutar el `|` no cambia ninguna ejecucion real.
+#     Misma clase ya documentada en semantic_check.py y deps_check.py.
+#
+#   - `except OSError` en `_ruta_segura` (linea 156). En Windows,
+#     `Path.resolve()` con strict=False (el default) es calculo puro de
+#     ruta y NO toca el filesystem, asi que no lanza nunca. Verificado
+#     probando NUL embebido, ruta de 800 componentes y caracteres
+#     invalidos de Windows (`<>:|?*`): los tres devuelven un Path sin
+#     lanzar. El guard se conserva igual porque en POSIX `resolve()` SI
+#     puede lanzar OSError ante un loop de symlinks - exactamente el
+#     ataque que cubre la Mitigacion 2 del ADR 0003 - y este auditor clona
+#     repos que pueden venir de POSIX. Es codigo defensivo inalcanzable en
+#     la plataforma de desarrollo, no codigo muerto.
+
+
+def test_leer_contexto_numera_las_lineas_de_verdad(tmp_path: Path) -> None:
+    """El prefijo `N: ` tiene que ser el numero de linea real del archivo,
+    no un contador que arranca en 0 o corrido en 1 - la evidencia de este
+    proyecto se cita como archivo:linea y tiene que poder abrirse."""
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 21)) + "\n")
+    evidencia = Evidence(file="app.py", line=10, note="Hex High Entropy String")
+
+    contexto = triage_agent._leer_contexto(tmp_path, evidencia, radio_lineas=2)
+
+    assert contexto.splitlines()[0] == "8: linea 8"
+    assert contexto.splitlines()[-1] == "12: linea 12"
+
+
+def test_leer_contexto_clampea_un_radio_gigante(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 301)) + "\n")
+    evidencia = Evidence(file="app.py", line=150, note="Hex High Entropy String")
+
+    contexto = triage_agent._leer_contexto(tmp_path, evidencia, radio_lineas=999)
+
+    # Clampeado a 50: 50 antes + la linea + 50 despues.
+    assert len(contexto.splitlines()) == 101
+
+
+def test_leer_contexto_clampea_un_radio_de_cero_o_negativo(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 21)) + "\n")
+    evidencia = Evidence(file="app.py", line=10, note="Hex High Entropy String")
+
+    contexto = triage_agent._leer_contexto(tmp_path, evidencia, radio_lineas=0)
+
+    assert len(contexto.splitlines()) == 3  # minimo 1 de radio
+
+
+def test_ejecutar_tool_usa_el_radio_por_defecto_si_falta_el_argumento(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 301)) + "\n")
+    evidencia = Evidence(file="app.py", line=150, note="Hex High Entropy String")
+
+    salida = triage_agent._ejecutar_tool(tmp_path, evidencia, "{}")
+
+    assert len(salida.splitlines()) == 51  # radio por defecto 25
+
+
+def test_ejecutar_tool_sobrevive_argumentos_que_no_son_json(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 301)) + "\n")
+    evidencia = Evidence(file="app.py", line=150, note="Hex High Entropy String")
+
+    salida = triage_agent._ejecutar_tool(tmp_path, evidencia, "no soy json")
+
+    assert len(salida.splitlines()) == 51
+
+
+def test_ejecutar_tool_sobrevive_un_radio_que_no_es_numero(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 301)) + "\n")
+    evidencia = Evidence(file="app.py", line=150, note="Hex High Entropy String")
+
+    salida = triage_agent._ejecutar_tool(tmp_path, evidencia, '{"radio_lineas": "muchas"}')
+
+    assert len(salida.splitlines()) == 51
+
+
+def test_ejecutar_tool_informa_el_error_en_vez_de_explotar(tmp_path: Path) -> None:
+    evidencia = Evidence(file="no_existe.py", line=1, note="Hex High Entropy String")
+
+    salida = triage_agent._ejecutar_tool(tmp_path, evidencia, '{"radio_lineas": 5}')
+
+    assert salida.startswith("ERROR:")
+
+
+def test_docstring_detectado_en_el_borde_exacto_de_su_primera_linea(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def f():\n"
+        '    """primera linea del docstring\n'
+        "\n"
+        "    ultima linea del docstring\n"
+        '    """\n'
+        "    return 1\n"
+    )
+    evidencia = Evidence(file="app.py", line=2, note="Hex High Entropy String")
+
+    assert triage_agent._hecho_estructural(tmp_path, evidencia) is not None
+
+
+def test_docstring_detectado_en_el_borde_exacto_de_su_ultima_linea(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def f():\n"
+        '    """primera linea del docstring\n'
+        "\n"
+        "    ultima linea del docstring\n"
+        '    """\n'
+        "    return 1\n"
+    )
+    evidencia = Evidence(file="app.py", line=5, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "docstring" in hecho.lower()
+
+
+def test_linea_justo_despues_del_docstring_no_es_docstring(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        'def f():\n    """doc."""\n    PASSWORD = "8f14e45fceea167a5a36dedd4bea2543"\n'
+    )
+    evidencia = Evidence(file="app.py", line=3, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "docstring" not in hecho.lower(), "es codigo, no documentacion"
+
+
+def test_docstring_se_encuentra_aunque_haya_funciones_sin_docstring_antes(
+    tmp_path: Path,
+) -> None:
+    """Si el recorrido de contenedores cortara con `break` en vez de
+    `continue` al toparse con una funcion sin docstring, nunca llegaria a
+    la que si lo tiene."""
+    (tmp_path / "app.py").write_text(
+        "def sin_doc_a():\n"
+        "    pass\n"
+        "\n"
+        "def sin_doc_b():\n"
+        "    pass\n"
+        "\n"
+        "def con_doc():\n"
+        '    """Ejemplo: 43fdd17f7e5ddc83.\n'
+        '    """\n'
+        "    return 1\n"
+    )
+    evidencia = Evidence(file="app.py", line=8, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "con_doc" in hecho
+
+
+def test_docstring_de_clase_se_detecta(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        'class Config:\n    """Ejemplo: 43fdd17f7e5ddc83."""\n    x = 1\n'
+    )
+    evidencia = Evidence(file="app.py", line=2, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "Config" in hecho
+
+
+def test_funcion_contenedora_es_la_mas_interna(tmp_path: Path) -> None:
+    """Con funciones anidadas, la senal util es la mas chica que contiene la
+    linea - la de afuera contiene todo y no distingue nada."""
+    (tmp_path / "app.py").write_text(
+        "def externa():\n"
+        "    def interna():\n"
+        '        token = "8f14e45fceea167a5a36dedd4bea2543"\n'
+        "        return token\n"
+        "    return interna\n"
+    )
+    evidencia = Evidence(file="app.py", line=3, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "interna" in hecho
+    assert "externa" not in hecho
+
+
+def test_funcion_mas_interna_con_numeros_de_linea_adversariales(tmp_path: Path) -> None:
+    """El span de una funcion se calcula como `fin - inicio`. Con un fixture
+    chico, mutar esa resta por `//`, `&` o `>>` da igual de casualidad. Estas
+    lineas exactas (externa 4-11, interna 5-10) se eligieron a proposito
+    porque con las tres operaciones alternativas los dos "spans" empatan
+    (`&`: 0 y 0, `//`: 2 y 2, `>>`: 0 y 0) y la funcion elegida pasa a ser la
+    externa, que es la respuesta equivocada. Buscadas por barrido exhaustivo
+    sobre todos los anidamientos validos, no a ojo."""
+    (tmp_path / "app.py").write_text(
+        "# 1\n"
+        "# 2\n"
+        "# 3\n"
+        "def externa():\n"  # linea 4
+        "    def interna():\n"  # linea 5
+        "        a = 1\n"
+        "        b = 2\n"
+        '        token = "8f14e45fceea167a5a36dedd4bea2543"\n'  # linea 8
+        "        c = 3\n"
+        "        return token\n"  # linea 10
+        "    return interna\n"  # linea 11
+    )
+    evidencia = Evidence(file="app.py", line=8, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "interna" in hecho
+    assert "externa" not in hecho
+
+
+def test_funcion_contenedora_se_encuentra_despues_de_otras_que_no_aplican(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def primera():\n"
+        "    pass\n"
+        "\n"
+        "def segunda():\n"
+        '    token = "8f14e45fceea167a5a36dedd4bea2543"\n'
+        "    return token\n"
+    )
+    evidencia = Evidence(file="app.py", line=5, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "segunda" in hecho
+
+
+def test_la_linea_del_def_ya_cuenta_como_dentro_de_la_funcion(tmp_path: Path) -> None:
+    """Borde exacto: un hallazgo en la linea del `def` (ej. un default hex en
+    la firma) esta dentro de esa funcion, no afuera."""
+    (tmp_path / "app.py").write_text(
+        'def f(token="8f14e45fceea167a5a36dedd4bea2543"):\n    return token\n'
+    )
+    evidencia = Evidence(file="app.py", line=1, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "'f'" in hecho
+
+
+def test_la_ultima_linea_de_la_funcion_todavia_cuenta_como_dentro(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def f():\n    x = 1\n    return \"8f14e45fceea167a5a36dedd4bea2543\"\n"
+    )
+    evidencia = Evidence(file="app.py", line=3, note="Hex High Entropy String")
+
+    hecho = triage_agent._hecho_estructural(tmp_path, evidencia)
+
+    assert hecho is not None
+    assert "'f'" in hecho
+
+
+def test_un_archivo_que_no_es_py_no_se_analiza_aunque_sea_python_valido(
+    tmp_path: Path,
+) -> None:
+    """El filtro es por extension exacta `.py`. Un `.md` con contenido que
+    casualmente parsea como Python no debe analizarse: si el chequeo se
+    mutara a una comparacion de orden, extensiones que ordenan antes que
+    '.py' pasarian el filtro."""
+    (tmp_path / "ejemplo.md").write_text(
+        'def f():\n    """Ejemplo: 43fdd17f7e5ddc83."""\n    return 1\n'
+    )
+    evidencia = Evidence(file="ejemplo.md", line=2, note="Hex High Entropy String")
+
+    assert triage_agent._hecho_estructural(tmp_path, evidencia) is None
+
+
+def test_linea_fuera_de_toda_funcion_no_reporta_funcion(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        'PASSWORD = "8f14e45fceea167a5a36dedd4bea2543"\n\ndef f():\n    pass\n'
+    )
+    evidencia = Evidence(file="app.py", line=1, note="Hex High Entropy String")
+
+    assert triage_agent._hecho_estructural(tmp_path, evidencia) is None
+
+
+def test_hecho_estructural_none_para_extension_parecida_pero_distinta(
+    tmp_path: Path,
+) -> None:
+    """`.pyi` no es `.py`: si el chequeo de sufijo se mutara a `==`, un
+    archivo Python real dejaria de analizarse y viceversa."""
+    (tmp_path / "stub.pyi").write_text('def f() -> str: ...\n')
+    evidencia = Evidence(file="stub.pyi", line=1, note="Hex High Entropy String")
+
+    assert triage_agent._hecho_estructural(tmp_path, evidencia) is None
+
+
+def test_parsear_veredicto_none_si_el_json_no_es_un_objeto() -> None:
+    assert triage_agent._parsear_veredicto("[1, 2, 3]") is None
+
+
+def test_parsear_veredicto_none_si_el_campo_no_es_booleano() -> None:
+    assert triage_agent._parsear_veredicto('{"es_secreto_real": "si"}') is None
+
+
+def test_parsear_veredicto_none_con_contenido_vacio() -> None:
+    assert triage_agent._parsear_veredicto("") is None
+    assert triage_agent._parsear_veredicto(None) is None
+
+
+def test_razon_con_contenido_none_no_explota() -> None:
+    assert triage_agent._razon(None) == "sin detalle"
+
+
+def test_razon_con_json_invalido_no_explota() -> None:
+    assert triage_agent._razon("no soy json") == "sin detalle"
+
+
+def test_razon_con_razon_vacia_cae_al_default() -> None:
+    assert triage_agent._razon('{"razon": ""}') == "sin detalle"
+
+
+def test_razon_con_razon_que_no_es_string_cae_al_default() -> None:
+    assert triage_agent._razon('{"razon": 42}') == "sin detalle"
+
+
+def test_razon_devuelve_la_razon_real() -> None:
+    assert triage_agent._razon('{"razon": "hash de commit"}') == "hash de commit"
+
+
+def test_la_llamada_va_con_temperature_cero(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text('TOKEN = "deadbeef0123456789abcdef"\n')
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[Evidence(file="app.py", line=1, note="Hex High Entropy String")],
+        )
+    }
+    client = _client_returning(_message(content=_veredicto(False)))
+
+    triage_agent.triage(tmp_path, resultados, client=client)
+
+    assert client.chat.completions.create.call_args.kwargs["temperature"] == 0
+
+
+def test_se_usa_el_primer_choice_de_la_respuesta(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text('TOKEN = "deadbeef0123456789abcdef"\n')
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[Evidence(file="app.py", line=1, note="Hex High Entropy String")],
+        )
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[
+            SimpleNamespace(message=_message(content=_veredicto(False, "primero"))),
+            SimpleNamespace(message=_message(content=_veredicto(True, "segundo"))),
+        ]
+    )
+
+    triaged = triage_agent.triage(tmp_path, resultados, client=client)
+
+    assert triaged["secrets"].verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert "primero" in triaged["secrets"].evidence[0].note
+
+
+def test_respuesta_sin_choices_no_explota(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text('TOKEN = "deadbeef0123456789abcdef"\n')
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[Evidence(file="app.py", line=1, note="Hex High Entropy String")],
+        )
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(choices=[])
+
+    triaged = triage_agent.triage(tmp_path, resultados, client=client)
+
+    assert triaged["secrets"].verdict == Verdict.NO_SOSTENIBLE
+
+
+def test_tool_call_con_content_none_manda_string_vacio_al_modelo(
+    tmp_path: Path,
+) -> None:
+    """La API rechaza `content: null` en un mensaje de assistant con
+    tool_calls - tiene que ir string vacio."""
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 30)) + "\n")
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[Evidence(file="app.py", line=5, note="Hex High Entropy String")],
+        )
+    }
+    client = _client_returning(
+        _message(content=None, tool_calls=[_tool_call("c1", '{"radio_lineas": 3}')]),
+        _message(content=_veredicto(False)),
+    )
+
+    triage_agent.triage(tmp_path, resultados, client=client)
+
+    mensajes = client.chat.completions.create.call_args.kwargs["messages"]
+    assistant = next(m for m in mensajes if m["role"] == "assistant")
+    assert assistant["content"] == ""
+
+
+def test_la_nota_de_no_corrio_cita_linea_cero(tmp_path: Path) -> None:
+    """Linea 0 = "esto no es una ubicacion real del repo". Mismo criterio
+    que deps_check._deps_file_fallback cuando no hay archivo que citar."""
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[Evidence(file="app.py", line=1, note="Hex High Entropy String")],
+        )
+    }
+
+    with patch(
+        "auditor.core.triage_agent.get_client",
+        side_effect=triage_agent.MissingApiKeyError("falta"),
+    ):
+        triaged = triage_agent.triage(tmp_path, resultados)
+
+    assert triaged["triage"].evidence[0].line == 0
+
+
+def test_las_anotaciones_no_se_aplican_al_verificador_equivocado(
+    tmp_path: Path,
+) -> None:
+    """Las anotaciones se guardan como (nombre_verificador, indice). Si el
+    filtro por nombre fallara, la nota de un hallazgo de `secrets` se
+    pegaria sobre la evidencia de `deps_check`, que ni siquiera se triagea."""
+    (tmp_path / "app.py").write_text('TOKEN = "deadbeef0123456789abcdef"\n')
+    dep_original = Evidence(file="pyproject.toml", line=1, note="'x' no esta declarado")
+    # 'deps_check' ordena ANTES que 'secrets' y 'semantic_check' DESPUES: hacen
+    # falta los dos para distinguir una igualdad real de una comparacion de
+    # orden que coincidiria por casualidad en una sola direccion.
+    sem_original = Evidence(file="README.md", line=1, note="afirmacion sin respaldo")
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[Evidence(file="app.py", line=1, note="Hex High Entropy String")],
+        ),
+        "deps_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE, evidence=[dep_original]
+        ),
+        "semantic_check": VerifierResult(
+            verdict=Verdict.APROBADO_CON_OBSERVACIONES, evidence=[sem_original]
+        ),
+    }
+    client = _client_returning(_message(content=_veredicto(False, "hash de config")))
+
+    triaged = triage_agent.triage(tmp_path, resultados, client=client)
+
+    assert triaged["deps_check"].evidence[0] == dep_original
+    assert triaged["deps_check"].verdict == Verdict.NO_SOSTENIBLE
+    assert triaged["semantic_check"].evidence[0] == sem_original
+    assert triaged["semantic_check"].verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert "triage" in triaged["secrets"].evidence[0].note
+
+
+def test_la_nota_de_triage_lleva_la_razon_de_ese_hallazgo(tmp_path: Path) -> None:
+    """Con varios hallazgos triageados, cada uno tiene que llevar SU razon,
+    no la del primero."""
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 10)) + "\n")
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(file="app.py", line=1, note="Hex High Entropy String"),
+                Evidence(file="app.py", line=2, note="Hex High Entropy String"),
+            ],
+        )
+    }
+    client = _client_returning(
+        _message(content=_veredicto(False, "razon del primero")),
+        _message(content=_veredicto(False, "razon del segundo")),
+    )
+
+    triaged = triage_agent.triage(tmp_path, resultados, client=client)
+
+    assert "razon del primero" in triaged["secrets"].evidence[0].note
+    assert "razon del segundo" in triaged["secrets"].evidence[1].note
+
+
+def test_un_hallazgo_no_ambiguo_sin_triagear_mantiene_la_severidad(
+    tmp_path: Path,
+) -> None:
+    """Aunque TODO lo ambiguo se triagee como inocuo, si queda un hallazgo
+    de otro tipo (una AWS key, que no se triagea) el veredicto no baja."""
+    (tmp_path / "app.py").write_text("\n".join(f"linea {i}" for i in range(1, 10)) + "\n")
+    resultados = {
+        "secrets": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(file="app.py", line=1, note="Hex High Entropy String"),
+                Evidence(file="app.py", line=2, note="AWS Access Key"),
+            ],
+        )
+    }
+    client = _client_returning(_message(content=_veredicto(False, "hash")))
+
+    triaged = triage_agent.triage(tmp_path, resultados, client=client)
+
+    assert triaged["secrets"].verdict == Verdict.NO_SOSTENIBLE
 
 
 # --- Contra la API real ---------------------------------------------------

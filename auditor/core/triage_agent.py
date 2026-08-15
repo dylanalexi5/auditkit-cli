@@ -447,21 +447,24 @@ def _aplicar_anotaciones(
         for i, item in enumerate(resultado.evidence)
     ]
 
-    sin_revisar = [
-        i for i, item in enumerate(resultado.evidence) if i not in propias and _es_ambiguo(item)
-    ]
-    queda_algo_real = any(es_real for es_real, _ in propias.values()) or bool(sin_revisar)
-    otros_hallazgos = any(
-        i not in propias and not _es_ambiguo(item)
-        for i, item in enumerate(resultado.evidence)
+    # El veredicto solo baja si TODO hallazgo fue revisado y NINGUNO resulto
+    # real. Un hallazgo sin revisar - porque se agoto el tope de la corrida,
+    # porque el agente no pudo concluir, o porque no era de un tipo que se
+    # triagee (una AWS key) - mantiene la severidad original: no haber
+    # podido descartarlo no es lo mismo que haberlo descartado.
+    #
+    # Antes esto estaba partido en dos condiciones ("queda algo ambiguo sin
+    # revisar" y "hay hallazgos de otro tipo") que juntas eran exactamente
+    # "algun hallazgo no se reviso" - la division por ambiguedad no aportaba
+    # nada y generaba un mutante equivalente imposible de matar.
+    todo_revisado = len(propias) == len(resultado.evidence)
+    ninguno_real = not any(es_real for es_real, _ in propias.values())
+
+    # El piso es APROBADO_CON_OBSERVACIONES, nunca APROBADO: el agente baja
+    # el ruido, no declara inocencia (ADR 0003, Mitigacion 3).
+    verdict = (
+        Verdict.APROBADO_CON_OBSERVACIONES
+        if todo_revisado and ninguno_real
+        else resultado.verdict
     )
-
-    if queda_algo_real or otros_hallazgos:
-        verdict = resultado.verdict
-    else:
-        # Todo lo ambiguo se triageo como no-secreto: el ruido baja, pero
-        # el piso es APROBADO_CON_OBSERVACIONES. El agente no declara
-        # inocencia (ADR 0003, Mitigacion 3).
-        verdict = Verdict.APROBADO_CON_OBSERVACIONES
-
     return VerifierResult(verdict=verdict, evidence=evidencia)
