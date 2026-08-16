@@ -5,6 +5,7 @@ from pathlib import Path
 import groq
 import pytest
 
+from auditor.core import embedding_index
 from auditor.core.models import Evidence, Verdict, VerifierResult
 from auditor.core.repo_context import RepoContext
 from auditor.core.semantic_client import MissingApiKeyError
@@ -407,3 +408,212 @@ def test_verify_real_api_extracts_and_cross_references(tmp_path: Path) -> None:
     if result.verdict == Verdict.APROBADO_CON_OBSERVACIONES:
         assert result.evidence
         assert result.evidence[0].file == "README.md"
+
+
+
+# --- Paso 1 del ADR 0003: cruce semantico como refuerzo del de keywords ---
+
+
+def _con_cliente(monkeypatch: pytest.MonkeyPatch, *claims: tuple[str, str]) -> None:
+    monkeypatch.setattr(
+        semantic_check,
+        "get_client",
+        lambda *a, **k: _FakeClient(content=_claims_payload(*claims)),
+    )
+
+
+def test_el_cruce_semantico_encuentra_lo_que_keywords_pierde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El caso medido: "vulnerabilities" y "vulnerabilidades" no comparten
+    ningun token, asi que la interseccion de keywords da vacio. El cruce
+    semantico si los relaciona."""
+    (tmp_path / "README.md").write_text("# demo\n\nNo known security vulnerabilities.\n")
+    otros = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(
+                    file="requirements.txt",
+                    line=1,
+                    note="pyyaml 5.3 tiene vulnerabilidades conocidas: CVE-2020-14343",
+                )
+            ],
+        )
+    }
+    _con_cliente(
+        monkeypatch,
+        ("No known security vulnerabilities", "No known security vulnerabilities."),
+    )
+    monkeypatch.setattr(embedding_index, "cruzar", lambda *a, **k: [0])
+
+    result = semantic_check.verify(RepoContext(path=tmp_path), otros)
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert any("CVE-2020-14343" in e.note for e in result.evidence)
+
+
+def test_lo_que_encuentra_keywords_no_se_pierde_si_el_semantico_no_lo_ve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Union, no reemplazo. La calibracion mostro que cada mecanismo
+    encuentra un par que el otro pierde, asi que sacar keywords seria
+    cambiar un hallazgo por otro en vez de sumar."""
+    (tmp_path / "README.md").write_text("# demo\n\n100% test coverage.\n")
+    otros = {
+        "readme_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(file="README.md", line=1, note="no hay funciones de test reales")
+            ],
+        )
+    }
+    _con_cliente(monkeypatch, ("100% test coverage", "100% test coverage."))
+    monkeypatch.setattr(embedding_index, "cruzar", lambda *a, **k: [None])
+
+    result = semantic_check.verify(RepoContext(path=tmp_path), otros)
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert any("no hay funciones de test" in e.note for e in result.evidence)
+
+
+def test_si_el_modelo_no_esta_disponible_se_cae_a_keywords_con_nota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Degradacion con gracia: el cruce de keywords sigue funcionando y queda
+    constancia de que el semantico no corrio - silenciar un "no corri" es
+    justo lo que este proyecto existe para no dejar pasar."""
+    (tmp_path / "README.md").write_text("# demo\n\n100% test coverage.\n")
+    otros = {
+        "readme_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(file="README.md", line=1, note="no hay funciones de test reales")
+            ],
+        )
+    }
+    _con_cliente(monkeypatch, ("100% test coverage", "100% test coverage."))
+
+    def _sin_modelo(*a, **k):
+        raise embedding_index.ModeloNoDisponibleError("sin modelo")
+
+    monkeypatch.setattr(embedding_index, "cruzar", _sin_modelo)
+
+    result = semantic_check.verify(RepoContext(path=tmp_path), otros)
+
+    assert any("no hay funciones de test" in e.note for e in result.evidence), (
+        "el cruce de keywords tiene que seguir funcionando sin el modelo"
+    )
+    assert any("cruce semántico" in e.note for e in result.evidence), (
+        "tiene que quedar constancia de que el cruce semántico no corrió"
+    )
+
+
+def test_sin_afirmaciones_no_se_toca_el_modelo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carga perezosa de punta a punta: el costo fijo de ~7.6s no se paga si
+    no hay nada que cruzar."""
+    (tmp_path / "README.md").write_text("# demo\n")
+    _con_cliente(monkeypatch)
+
+    def _explota(*a, **k):
+        raise AssertionError("no deberia tocar el modelo sin afirmaciones")
+
+    monkeypatch.setattr(embedding_index, "cruzar", _explota)
+
+    result = semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    assert result.verdict == Verdict.APROBADO
+
+
+def test_sin_evidencia_contra_que_cruzar_no_se_toca_el_modelo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un repo donde los 4 verificadores dieron APROBADO no tiene notas contra
+    las que cruzar: pagar el modelo ahi seria tirar 7.6s."""
+    (tmp_path / "README.md").write_text("# demo\n\n100% test coverage.\n")
+    _con_cliente(monkeypatch, ("100% test coverage", "100% test coverage."))
+
+    def _explota(*a, **k):
+        raise AssertionError("no deberia tocar el modelo sin evidencia")
+
+    monkeypatch.setattr(embedding_index, "cruzar", _explota)
+
+    result = semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    assert result.verdict == Verdict.APROBADO
+
+
+def test_el_cruce_semantico_nunca_llega_a_no_sostenible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El techo del ADR 0002 se mantiene: el cruce semantico es una heuristica
+    probabilistica, no puede tumbar un repo sano al nivel mas severo."""
+    (tmp_path / "README.md").write_text("# demo\n\nNo known security vulnerabilities.\n")
+    otros = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(file="req.txt", line=1, note="pyyaml tiene vulnerabilidades")
+            ],
+        )
+    }
+    _con_cliente(
+        monkeypatch,
+        ("No known security vulnerabilities", "No known security vulnerabilities."),
+    )
+    monkeypatch.setattr(embedding_index, "cruzar", lambda *a, **k: [0])
+
+    result = semantic_check.verify(RepoContext(path=tmp_path), otros)
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+
+
+@pytest.mark.slow
+def test_modelo_real_el_nombre_del_proyecto_no_arrastra_el_cruce_semantico(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regresion del caso real de psf/black, contra el modelo de verdad.
+
+    El bug del nombre de proyecto que el ADR 0002 arreglo para el cruce de
+    keywords reaparece intacto con embeddings, y ahi es peor: medido, el
+    falso positivo puntuaba MAS ALTO que el verdadero (0.341 vs 0.252).
+    Sacando el nombre antes de embeber se invierte (0.041 vs 0.342).
+
+    Este test corre el pipeline completo con el modelo real: la afirmacion
+    sobre la licencia NO debe cruzarse con la evidencia de '_black_version'.
+    """
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "black"\n')
+    (tmp_path / "README.md").write_text("# demo\n\n_Black_ is licensed under MIT.\n")
+    monkeypatch.setattr(
+        semantic_check,
+        "get_client",
+        lambda *a, **k: _FakeClient(
+            content=_claims_payload(
+                ("Black is licensed under MIT", "_Black_ is licensed under MIT.")
+            )
+        ),
+    )
+    otros = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(
+                    file="pyproject.toml",
+                    line=1,
+                    note=(
+                        "'_black_version' se importa en el codigo pero no esta "
+                        "declarado en requirements.txt/pyproject.toml"
+                    ),
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), otros)
+
+    assert result.verdict == Verdict.APROBADO, (
+        f"la licencia MIT no tiene nada que ver con un modulo de version "
+        f"sin declarar: {result.evidence}"
+    )

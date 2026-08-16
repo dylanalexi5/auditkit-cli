@@ -4,6 +4,7 @@ from pathlib import Path
 
 import groq
 
+from auditor.core import embedding_index
 from auditor.core.models import Evidence, Verdict, VerifierResult
 from auditor.core.repo_context import RepoContext, declared_project_names
 from auditor.core.semantic_client import MissingApiKeyError, get_client
@@ -145,6 +146,64 @@ def _find_contradicting_evidence(
     return None
 
 
+def _toda_la_evidencia(other_results: dict[str, VerifierResult]) -> list[Evidence]:
+    return [item for result in other_results.values() for item in result.evidence]
+
+
+def _sin_nombre_de_proyecto(texto: str, exclude: frozenset[str]) -> str:
+    """Saca del texto las palabras del nombre del proyecto, antes de embeber.
+
+    El bug que el ADR 0002 documenta para el cruce de keywords ("black"
+    aparece en toda afirmación sobre sí mismo Y en evidencia sin relación
+    como `_black_version`) reaparece intacto con embeddings, y ahí es peor:
+    el modelo no tiene un equivalente a "restar un token", junta los dos
+    textos por el nombre compartido y listo.
+
+    Medido sobre el caso real de psf/black, la diferencia es dar vuelta el
+    resultado, no matizarlo:
+
+        con el nombre:  falso positivo 0.341  /  verdadero 0.252
+        sin el nombre:  falso positivo 0.041  /  verdadero 0.342
+
+    Con el nombre adentro, el falso positivo puntúa MÁS ALTO que el
+    verdadero. Sacándolo, se invierte el orden y los dos quedan del lado
+    correcto del umbral.
+    """
+    if not exclude:
+        return texto
+    return _KEYWORD.sub(
+        lambda m: "" if m.group(0).lower() in exclude else m.group(0), texto
+    )
+
+
+def _cruce_semantico(
+    afirmaciones: list[str], evidencia: list[Evidence], exclude: frozenset[str]
+) -> tuple[list[int | None], bool]:
+    """Índice de la evidencia más parecida a cada afirmación, por embeddings.
+
+    Devuelve `(resultados, disponible)`. Si el modelo no está disponible,
+    `disponible` es False y todos los resultados son None: el cruce de
+    keywords sigue funcionando y quien llama deja constancia de que este
+    refuerzo no corrió (ADR 0003, Paso 1).
+
+    No reemplaza al cruce de keywords, lo complementa. Medido sobre 11 pares
+    reales: cada mecanismo encuentra un caso que el otro pierde, así que
+    quedarse con uno solo cambiaría un hallazgo por otro en vez de sumar.
+    """
+    if not afirmaciones or not evidencia:
+        return [None] * len(afirmaciones), True
+    try:
+        return (
+            embedding_index.cruzar(
+                [_sin_nombre_de_proyecto(a, exclude) for a in afirmaciones],
+                [_sin_nombre_de_proyecto(e.note, exclude) for e in evidencia],
+            ),
+            True,
+        )
+    except embedding_index.ModeloNoDisponibleError:
+        return [None] * len(afirmaciones), False
+
+
 def verify(ctx: RepoContext, other_results: dict[str, VerifierResult]) -> VerifierResult:
     readme_path = _find_readme(ctx.path)
     if readme_path is None:
@@ -163,12 +222,23 @@ def verify(ctx: RepoContext, other_results: dict[str, VerifierResult]) -> Verifi
         return VerifierResult(verdict=Verdict.APROBADO, evidence=[])
 
     exclude = _project_name_tokens(ctx.path)
+    evidencia_existente = _toda_la_evidencia(other_results)
+    semanticos, modelo_disponible = _cruce_semantico(
+        [claim["afirmacion"] for claim in claims], evidencia_existente, exclude
+    )
+
     evidence: list[Evidence] = []
-    for claim in claims:
+    for indice, claim in enumerate(claims):
         afirmacion = claim["afirmacion"]
         cita = claim["cita_textual_del_readme"]
         claim_keywords = _keywords(afirmacion, exclude)
         contradicting = _find_contradicting_evidence(claim_keywords, other_results, exclude)
+        if contradicting is None:
+            # Solo si el cruce de keywords no encontro nada: el semantico es
+            # un refuerzo, no un reemplazo.
+            indice_semantico = semanticos[indice]
+            if indice_semantico is not None:
+                contradicting = evidencia_existente[indice_semantico]
         if contradicting is None:
             continue
         evidence.append(
@@ -178,6 +248,20 @@ def verify(ctx: RepoContext, other_results: dict[str, VerifierResult]) -> Verifi
                 note=(
                     f'README dice "{cita}" pero hay evidencia que lo contradice: '
                     f"{contradicting.file}:{contradicting.line} — {contradicting.note}"
+                ),
+            )
+        )
+
+    if not modelo_disponible:
+        # Silenciar un "no corrí" es exactamente lo que esta herramienta
+        # existe para no dejar pasar en otros repos (ADR 0003).
+        evidence.append(
+            Evidence(
+                file="(sin verificar)",
+                line=0,
+                note=(
+                    "el cruce semántico no corrió: no se pudo cargar el modelo de "
+                    "embeddings — solo se cruzó por palabras clave"
                 ),
             )
         )

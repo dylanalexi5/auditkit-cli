@@ -16,6 +16,9 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "slow: carga el modelo de embeddings real (~7.6s la primera vez del proceso)",
+]
 
 [tool.ruff]
 line-length = 100
