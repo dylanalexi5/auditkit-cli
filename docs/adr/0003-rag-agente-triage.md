@@ -183,8 +183,11 @@ psf/black             6         0           5       5         0
 psf/requests         18         2          11       9         0
 ```
 
-`perdidos = 0` en los tres confirma que el diseño de unión funciona: el
-semántico nunca pisa lo que el cruce de keywords ya encontraba.
+`perdidos = 0` en los tres. Vale ser preciso sobre qué prueba eso: el cruce
+semántico solo se consulta cuando el de keywords no encontró nada, así que
+por construcción **no puede** pisar un hallazgo previo. Es un chequeo de
+regresión de la implementación contra su diseño, no evidencia de que el
+diseño sea bueno.
 
 **De los 18 hallazgos nuevos, los 18 son falsos.** Revisados uno por uno,
 ninguno es defendible:
@@ -195,6 +198,71 @@ ninguno es defendible:
   ← contradicho por `'hatch_vcs' está declarado pero no se usa`
 - `"- Streaming Downloads"`
   ← contradicho por `'httpbin' está declarado pero no se usa`
+
+#### Errores que se componen: dos de los 18 citan evidencia que ya era falsa
+
+Un caso parecía el menos indefendible de los 18 — `"_Black_ can be installed
+by running pip install black"` contra `'multidict' se importa en el código
+pero no está declarado` — porque un import no declarado sí es, en abstracto,
+un problema de instalación. Verificado en el código, no se sostiene, y por
+una razón peor que la similitud:
+
+```python
+# black, src/blackd/__init__.py:9
+try:
+    from aiohttp import web
+    from multidict import MultiMapping
+    from .middlewares import cors
+except ImportError as ie:
+    raise ImportError(f"aiohttp dependency is not installed: {ie}. ...")
+```
+
+```python
+# requests, src/requests/help.py:24
+try:
+    from urllib3.contrib import pyopenssl
+except ImportError:
+    pyopenssl = None
+    OpenSSL = None
+else:
+    import cryptography
+    import OpenSSL
+```
+
+Los dos son imports **opcionales** dentro de `try/except ImportError` — el
+idioma canónico de Python para "esta dependencia puede no estar, y está
+bien". No son dependencias sin declarar. **La nota de `deps_check` ya era un
+falso positivo antes de que el cruce semántico la tocara.**
+
+O sea que el cruce semántico no solo inventó la relación: la inventó contra
+evidencia que tampoco era cierta. El caso que parecía discutible resulta ser
+el más claro de los 18, y el conteo honesto sigue siendo 18/18.
+
+**Bug de `deps_check` encontrado de paso — no arreglado acá.** `deps_check`
+ya ignora `if TYPE_CHECKING: import X` (se arregló en el PR #3), pero no el
+idioma hermano `try: import X / except ImportError:`. Reproducido mínimo:
+
+```python
+# repro/src/mod.py, con pyproject.toml sin dependencias
+if TYPE_CHECKING:
+    import solo_para_tipos      # correctamente ignorado
+try:
+    import dependencia_opcional # FLAGGED
+except ImportError:
+    dependencia_opcional = None
+```
+
+```
+veredicto: Verdict.NO_SOSTENIBLE
+  pyproject.toml:1 - 'dependencia_opcional' se importa en el codigo pero no
+  esta declarado en requirements.txt/pyproject.toml
+```
+
+El veredicto más duro que emite la herramienta, sobre un idioma de Python
+perfectamente legítimo. Es el mismo tipo de falso positivo que motivó el
+PR #3 y afecta a `black` y `requests` reales. Queda registrado acá como
+deuda con reproducción; el arreglo es una rama aparte, no se mezcla con la
+decisión sobre el cruce semántico.
 
 #### Por qué falla — no es el umbral, es la relación que se está midiendo
 
