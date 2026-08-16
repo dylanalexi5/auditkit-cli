@@ -163,19 +163,128 @@ gaps reales, incluido que `keepdims=True` necesita *dos vectores de normas
 distintas **y** una nota que ejercite la segunda componente* para notarse:
 con una nota `[1, 0]` el error se cancela por casualidad.
 
-**Lo que todavía NO está demostrado.** Que el Paso 1 se gane el lugar en
-repos reales. La calibración son 11 casos construidos a mano, y el
-"esperado" de cada uno lo decidió quien los escribió — no hay ground truth
-verificable como sí lo había con los secretos, donde se abría el archivo y
-se veía. Falta la tabla de balance sobre `click`, `black` y `requests`:
-cuántas afirmaciones pasaron de "sin evidencia" a "con evidencia", y cuántas
-de esas un humano llamaría correctas. **El Paso 2 no se construye hasta
-tener esos números.**
+#### Tabla de balance sobre repos reales — **el Paso 1 no se gana el lugar**
 
-### Paso 2 — RAG sobre el código (12-33s) — **condicional**
+La calibración eran 11 casos construidos a mano, con el "esperado" de cada
+uno decidido por quien los escribió. Quedó anotado arriba como límite
+conocido. Medido contra repos reales, el límite resultó ser el resultado.
 
-Solo si el Paso 1 demuestra que la infraestructura de embeddings se gana el
-lugar. Ahí sí `auditor/core/rag_index.py`: fragmentos por función/clase vía
+A/B sobre el mismo repo y **las mismas afirmaciones** (se extraen una vez y
+se fijan para las dos corridas, para que la varianza del LLM no se cuele en
+la diferencia): una corrida con el cruce semántico activo, otra forzando
+`ModeloNoDisponibleError`, que cae a keywords puro por el mismo camino que
+en producción.
+
+```
+repo              afirm  keywords  +semantico  nuevos  perdidos
+---------------------------------------------------------------
+pallets/click         4         0           4       4         0
+psf/black             6         0           5       5         0
+psf/requests         18         2          11       9         0
+```
+
+`perdidos = 0` en los tres confirma que el diseño de unión funciona: el
+semántico nunca pisa lo que el cruce de keywords ya encontraba.
+
+**De los 18 hallazgos nuevos, los 18 son falsos.** Revisados uno por uno,
+ninguno es defendible:
+
+- `"Click is a Python package for creating beautiful command line interfaces"`
+  ← contradicho por `'sphinx_tabs' está declarado pero no se usa`
+- `"_Black_ is a PEP 8 compliant opinionated formatter."`
+  ← contradicho por `'hatch_vcs' está declarado pero no se usa`
+- `"- Streaming Downloads"`
+  ← contradicho por `'httpbin' está declarado pero no se usa`
+
+#### Por qué falla — no es el umbral, es la relación que se está midiendo
+
+Primero hay que saber qué significan los números con este modelo. Medido
+sobre un par de referencia:
+
+```
+paráfrasis ("the cat sat on the mat" / "a feline rested upon the rug")  0.556
+sin relación ("the cat sat on the mat" / "quarterly revenue exceeded")  -0.012
+```
+
+O sea: `_UMBRAL = 0.30` no es "algo relacionado", está a mitad de camino
+entre *sin relación alguna* y *paráfrasis*. Y los puntajes ganadores reales
+—mediana 0.406 en click, 0.392 en black, 0.343 en requests— nunca llegan
+cerca del nivel de paráfrasis. El "mejor match" nunca fue un match fuerte.
+
+Barrido de umbral, hallazgos totales sobre los tres repos:
+
+```
+0.30 -> 20    0.40 -> 12    0.50 -> 1
+0.35 -> 15    0.45 ->  3    0.60 -> 0
+```
+
+**No hay punto de operación que sirva.** Los que sobreviven a 0.45 siguen
+siendo falsos; al umbral donde desaparecen los falsos positivos (0.60) no
+queda ningún hallazgo. Subir el umbral no separa señal de ruido porque no
+hay señal que separar.
+
+Dos modos de falla distintos, medidos por separado:
+
+**1. Corpus de notas colapsado (click, black).** Las notas de evidencia son
+strings de plantilla que escribimos nosotros — `'X' está declarado pero no
+se usa en el código` — así que todas las notas de un verificador son casi el
+mismo texto, y lo único que varía es el nombre del paquete, justo el token
+sin peso semántico. Similitud media *entre notas del mismo corpus*: **0.501
+en click**, casi nivel de paráfrasis. El margen entre la nota ganadora y la
+segunda es de **0.003**: el `argmax` no está eligiendo, está desempatando al
+azar entre notas intercambiables. En promedio 2.8 de 13 notas quedan
+empatadas con el ganador dentro de 0.02.
+
+**2. Proximidad temática ≠ contradicción (requests).** Acá el corpus **no**
+está colapsado (similitud media entre notas 0.274, mediana 0.114) y aun así
+una sola nota, `'httpbin' está declarado pero no se usa`, gana el `argmax`
+de **10 de 16** afirmaciones. No por un defecto del corpus: `httpbin` es
+genuinamente la nota más cercana a un README que habla de HTTP en cada
+línea. El problema es la premisa del diseño. La similitud coseno encuentra
+la nota que habla del **mismo tema**, y el diseño la trata como si fuera la
+nota que **refuta la afirmación**. Son dos relaciones distintas y solo
+coinciden por casualidad.
+
+Esa casualidad es exactamente lo que hizo pasar la calibración: el par que
+funcionaba —`"No known security vulnerabilities"` ↔ `"pyyaml ...
+vulnerabilidades conocidas"`— es un caso donde el tema compartido y la
+contradicción coinciden. En repos reales no coinciden, y el mecanismo se
+queda con el tema.
+
+Es un error de diseño, no de calibración. Ningún umbral, y ningún modelo de
+embeddings más grande, arregla una función de ranking que mide la relación
+equivocada.
+
+#### Consecuencia
+
+**El Paso 2 queda descartado, no pospuesto** (ver abajo). Y el Paso 1 tal
+como está implementado no debería mergearse: agrega 18 observaciones falsas
+y 0 verdaderas sobre tres repos reales, en una herramienta cuyo propósito
+declarado es no dejar pasar afirmaciones sin respaldo. Un verificador que
+inventa contradicciones es peor que no tenerlo.
+
+Queda pendiente de decisión humana qué se hace con el código del Paso 1
+(revertir, o dejarlo apagado por defecto). La medición no decide eso; sí
+decide que encendido por defecto no va.
+
+### Paso 2 — RAG sobre el código (12-33s) — **DESCARTADO**
+
+Era condicional a que el Paso 1 demostrara que la infraestructura de
+embeddings se gana el lugar. La tabla de balance de arriba dice que no, y la
+causa medida —similitud coseno encuentra el mismo tema, no la
+contradicción— aplica igual o peor al Paso 2: buscar "el código más
+parecido a esta afirmación" sobre un corpus de funciones devuelve la función
+que habla del mismo tema, que es precisamente lo que uno esperaría encontrar
+si la afirmación **es cierta**. El Paso 2 heredaría el defecto con un corpus
+100x más grande y 25s más de costo por corrida.
+
+Se ahorran esos 25s por corrida en repos grandes. Ese también es un
+resultado válido, y es el que efectivamente ocurrió.
+
+El diseño original queda registrado abajo para que se entienda qué se
+descartó y contra qué se lo comparó — no como trabajo pendiente.
+
+Ahí iba `auditor/core/rag_index.py`: fragmentos por función/clase vía
 el `ast` que ya usa `readme_check.py`, vectores en un índice FAISS **en
 memoria** (nada persistente, nada que instalar como base de datos), y
 
