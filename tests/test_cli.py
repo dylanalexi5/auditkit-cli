@@ -64,3 +64,52 @@ def test_main_without_semantic_flag_never_calls_semantic_check(
 
     assert exit_code == 0
     assert "semantic_check" not in capsys.readouterr().out
+
+
+def test_main_without_triage_flag_never_calls_the_agent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Opt-in real: sin --triage no se toca la API de Groq (mismo criterio
+    que --semantic y --run-tests, ADR 0003)."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("no deberia llamar al agente sin --triage")
+
+    monkeypatch.setattr(cli, "_clone", _fake_clone)
+    monkeypatch.setattr(cli.triage_agent, "triage", _boom)
+
+    assert cli.main(["https://github.com/octocat/Hello-World"]) == 0
+
+
+def test_main_triage_flag_runs_the_agent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    llamado = {}
+
+    def _fake_triage(repo_path, results, **kwargs):
+        llamado["si"] = True
+        return results
+
+    monkeypatch.setattr(cli, "_clone", _fake_clone)
+    monkeypatch.setattr(cli.triage_agent, "triage", _fake_triage)
+
+    assert cli.main(["https://github.com/octocat/Hello-World", "--triage"]) == 0
+    assert llamado.get("si")
+
+
+def test_main_triage_failure_does_not_kill_the_report(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Si el agente explota, el reporte sale igual con lo que ya verificaron
+    los verificadores deterministas (ADR 0003, Mitigacion 4)."""
+
+    def _explota(*args, **kwargs):
+        raise RuntimeError("el agente se rompio")
+
+    monkeypatch.setattr(cli, "_clone", _fake_clone)
+    monkeypatch.setattr(cli.triage_agent, "triage", _explota)
+
+    exit_code = cli.main(["https://github.com/octocat/Hello-World", "--triage"])
+
+    assert exit_code == 0
+    assert "secrets" in capsys.readouterr().out

@@ -5,6 +5,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from auditor.core import triage_agent
+from auditor.core.models import AuditReport, worst_verdict
 from auditor.core.orchestrator import add_result
 from auditor.core.orchestrator import run as run_orchestrator
 from auditor.core.repo_context import RepoContext
@@ -58,6 +60,23 @@ def _confirm_run_tests() -> bool:
     return answer.strip().lower() == "y"
 
 
+def _apply_triage(report: AuditReport, repo_path: Path) -> AuditReport:
+    """El triage corre en su propio borde: si explota, el reporte sale igual
+    con lo que ya verificaron los demas (ADR 0003, Mitigacion 4). Sin este
+    try, una excepcion en el agente tiraria tambien los resultados de los
+    verificadores deterministas que ya habian terminado bien."""
+    try:
+        results = triage_agent.triage(repo_path, report.verifier_results)
+    except Exception:  # noqa: BLE001 - ninguna falla del agente puede tumbar el reporte
+        return report
+
+    return AuditReport(
+        final_verdict=worst_verdict(r.verdict for r in results.values()),
+        verifier_results=results,
+        skipped_verifiers=report.skipped_verifiers,
+    )
+
+
 def _use_utf8_streams() -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -81,6 +100,14 @@ def main(argv: list[str] | None = None) -> int:
         "--semantic",
         action="store_true",
         help="corre semantic_check (usa la API de Groq, requiere GROQ_API_KEY)",
+    )
+    parser.add_argument(
+        "--triage",
+        action="store_true",
+        help=(
+            "revisa los hallazgos ambiguos de secrets con el agente de triage "
+            "(usa la API de Groq, requiere GROQ_API_KEY)"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -107,6 +134,9 @@ def main(argv: list[str] | None = None) -> int:
 
         ctx = RepoContext.from_path(repo_path)
         report = run_orchestrator(ctx, verifiers, skipped_verifiers=skipped)
+
+        if args.triage:
+            report = _apply_triage(report, ctx.path)
 
         if args.semantic:
             semantic_result = semantic_check.verify(ctx, report.verifier_results)
