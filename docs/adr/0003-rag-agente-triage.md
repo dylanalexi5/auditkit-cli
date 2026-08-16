@@ -508,6 +508,60 @@ condiciones que juntas eran exactamente "algún hallazgo no se revisó". Se
 reemplazó por `todo_revisado and ninguno_real`, que dice lo mismo directo —
 el mutante equivalente desaparece de raíz en vez de quedar documentado.
 
+### Fase 4 completa: los tres repos
+
+Corridas reales, antes y después de `--triage`, sobre `pallets/click`,
+`psf/black` y `psf/requests`.
+
+| Repo | Hallazgos ambiguos (entropía) | Triageados bien | Qué pasó |
+|---|---|---|---|
+| `pallets/click` | **0** | — | `secrets` da `APROBADO`: no hay nada que triagear. El reporte con y sin `--triage` es **byte a byte idéntico**. |
+| `psf/black` | 4 | **3** | Tres docstrings bajados; el blob de JSON en un test, no. |
+| `psf/requests` | 3 | **2** | Dos valores de auth de prueba bajados; un `etag` en documentación, no. |
+
+**Sobre `click`: el agente no aporta nada, y eso está bien.** No tiene
+hallazgos de entropía, así que no hay ambigüedad que resolver. Vale
+registrarlo porque es el resultado honesto: la utilidad del agente depende
+por completo de que el repo auditado tenga ruido de este tipo. En un repo
+limpio no gasta ni una llamada de API — el filtro por tipo de hallazgo corta
+antes.
+
+**Sobre `requests`: el caso más informativo de los tres.** Tiene 12 hallazgos
+en `secrets`, de los cuales solo 3 son de entropía. El agente tocó
+exactamente esos 3 y dejó intactos los otros 9 — 4 `Private Key` y 5
+`Basic Auth Credentials`, todos identificados por regex específico. Eso es el
+diseño funcionando: no gasta cuota confirmando lo que un patrón ya identificó,
+y no se arriesga a bajarle la severidad a un hallazgo de alta confianza.
+
+Los dos que bajó son correctos, verificados abriendo el archivo:
+
+```
+tests/test_lowlevel.py:135  b'WWW-Authenticate: Digest nonce="6bf5d6e4da1ce66918800195d6b9130d"'
+tests/test_lowlevel.py:136  b', opaque="372825293d1c26955496c80ed6426e9e", '
+```
+
+Son el `nonce` y el `opaque` de una respuesta HTTP 401 falsa armada como dato
+de test. Un nonce es por definición un valor descartable, no una credencial.
+
+**El que no bajó revela una limitación que no estaba documentada:**
+
+```
+docs/user/quickstart.rst:419   'etag': '"e1ca502697e5c9317743dc078f67693f"',
+```
+
+Es un `etag` dentro de un bloque de salida de ejemplo en la documentación —
+un falso positivo claro. El agente no lo bajó porque **`_hecho_estructural`
+solo analiza archivos `.py`**: para un `.rst` devuelve `None`, así que el
+modelo se queda sin la señal estructural y decide solo con el texto crudo.
+
+Es la misma clase que el caso pendiente de `black`
+(`tests/test_ipynb.py:367`): cuando `ast` no puede afirmar un hecho fuerte, el
+agente se mantiene conservador. Con la diferencia de que acá el motivo es más
+fácil de atacar — los archivos de documentación son justamente donde viven
+los ejemplos que disparan falsos positivos de entropía, y hoy son el punto
+ciego del hecho estructural. Queda anotado como deuda, no resuelto en esta
+fase.
+
 ### Estado de la validación real (bloqueado por cuota)
 
 Los cinco `test_real_api_*` **no están verificados** contra el fix de `ast`:
