@@ -318,6 +318,31 @@ def test_locate_quote_on_first_line_returns_one() -> None:
     assert semantic_check._locate_quote(text, "TARGET al principio") == 1
 
 
+# Mutation testing de `_locate_quote` y la rama de cita no localizada
+# (cosmic-ray sobre auditor/verifiers/semantic_check.py):
+# 140 mutantes -> 92 muertos, 47 sobrevivientes, 1 incompetente.
+#
+# Los 47 sobrevivientes, verificados uno por uno y no asumidos:
+#   44  anotaciones `X | None` (L47, L68, L127, L151). PEP 649: en 3.14 las
+#       anotaciones no se evaluan en runtime, asi que mutar el `|` es invisible.
+#    1  `choices[0]` -> `choices[-1]`: pedimos n=1, lista de un elemento,
+#       los dos indices son el mismo. Equivalente mientras no pidamos n>1.
+#    1  `index == -1` -> `index <= -1`: `str.find` devuelve -1 o >= 0, nunca
+#       menos que -1. Equivalente por el contrato de find.
+#    1  `index == -1` -> `index is -1`: CPython cachea los enteros -5..256,
+#       asi que `is` vale exactamente cuando vale `==` para este valor.
+# El incompetente es un bug del operador ExceptionReplacer de cosmic-ray
+# ("'PythonNode' object has no attribute 'value'"), no del codigo.
+#
+# Advertencia para futuras corridas en Windows: cosmic-ray hace
+# `stdout.decode("utf-8")` en la rama de KILLED (cosmic_ray/testing.py:77).
+# Las notas de este proyecto llevan em-dash, pytest las emite en cp1252 al
+# fallar, el decode explota y el mutante MUERTO se registra INCOMPETENT.
+# La primera corrida dio 16 muertos / 77 incompetentes por eso. Con
+# PYTHONIOENCODING=utf-8 da 92/1, y los 47 sobrevivientes son los mismos
+# -- el bug solo subcuenta muertes, nunca convierte un sobreviviente.
+
+
 def test_locate_quote_not_found_returns_none_instead_of_inventing_line_one() -> None:
     # Este test reemplaza a uno que asertaba `== 1`, o sea que fijaba el bug
     # como comportamiento esperado. Devolver 1 ante una cita que no esta en el
