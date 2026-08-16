@@ -193,7 +193,11 @@ def test_verify_without_dependency_files_does_not_cite_a_path(tmp_path: Path) ->
 
     assert result.verdict == Verdict.NO_SOSTENIBLE
     for item in result.evidence:
-        assert item.file == deps_check._NO_DEPS_FILE, (
+        # Literal, no deps_check._NO_DEPS_FILE: comparar contra la misma
+        # constante del modulo bajo prueba es tautologico - si el valor
+        # cambiara, cambiarian los dos lados y el test pasaria igual.
+        # Ver la regla en CLAUDE.md.
+        assert item.file == "(no se encontró archivo de dependencias)", (
             f"la evidencia cita '{item.file}', que no existe en el repo"
         )
 

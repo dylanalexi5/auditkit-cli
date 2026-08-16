@@ -9,6 +9,14 @@ dependencias reales — no contra lo que el README afirma.
 - Nunca inventes que una librería/función existe sin verificarlo en el código.
 - Si el build o los tests fallan, repórtalo tal cual — no lo "arregles" cambiando el criterio de éxito.
 - Cada verificación debe poder señalar archivo:línea como evidencia, no una afirmación genérica.
+- **Antes de commitear un test nuevo, revisá que ninguna aserción compare contra
+  la misma constante o atributo del módulo que está probando.** Una aserción como
+  `assert mock.call_count == modulo._MAX_INTENTOS` es tautológica: pasa con
+  cualquier valor, porque si el valor cambia, cambian los dos lados. Va el
+  literal (`== 3`). Esto ya se coló dos veces —`semantic_check.py` y
+  `triage_agent.py`— y en ambas la detectó el mutation testing, no la revisión
+  del test. Vale para constantes, umbrales, timeouts y cualquier atributo del
+  módulo bajo prueba.
 
 ## Comandos
 - Tests: `pytest`
