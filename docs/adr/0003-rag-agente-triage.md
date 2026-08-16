@@ -30,7 +30,8 @@ para `semantic_check.py`:
 
 ## Fases 1 y 2 — RAG: **rediseñadas antes de implementar**
 
-> **Estado: no implementadas.** Este bloque reemplaza el diseño original
+> **Estado: Paso 1 implementado, Paso 2 sin construir (y condicional).**
+> Este bloque reemplaza el diseño original
 > tras medir el costo real y encontrarle un problema de principio. Lo que
 > decía antes queda registrado en "Qué se descartó y por qué", más abajo —
 > no se borra, porque las razones del descarte son la parte útil.
@@ -111,6 +112,65 @@ notas de evidencia ya producidas, y se cruzan por similitud coseno. Son
 - **Métrica chequeable:** ¿encuentra contradicciones que el cruce de
   keywords se perdía? ¿introduce observaciones falsas? Se mide con la misma
   tabla de balance que se usó para el triage.
+
+#### Resultado — **IMPLEMENTADO** (`auditor/core/embedding_index.py`)
+
+**Umbral calibrado, no elegido a ojo.** 11 pares reales (afirmaciones típicas
+de README contra las notas que producen los 4 verificadores), medidos con el
+modelo real:
+
+| umbral | encuentra que keywords pierde | falsos positivos |
+|---|---|---|
+| 0.25 | 1 | **1** |
+| **0.30** | **1** | **0** |
+| 0.35 | 0 | 0 |
+
+**Unión, no reemplazo — y eso lo decidió la medición.** Cada mecanismo
+encuentra un caso que el otro pierde: keywords agarra *"100% test coverage"*
+(comparte el token `test`), el semántico agarra *"No known security
+vulnerabilities"* (que keywords no ve por idioma). Quedarse solo con el
+semántico cambiaría un hallazgo por otro en vez de sumar, así que el
+semántico solo se consulta **cuando keywords no encontró nada**.
+
+**El bug del nombre de proyecto reaparece con embeddings, y ahí es peor.** El
+ADR 0002 documenta que "black" aparece en toda afirmación sobre sí mismo *y*
+en evidencia sin relación (`_black_version`), y cómo se arregló restándolo de
+ambos lados del cruce de keywords. Con embeddings no hay forma de "restar un
+token": el modelo junta los dos textos por el nombre compartido. Medido sobre
+el caso real de `psf/black`, **el falso positivo puntuaba más alto que el
+verdadero**:
+
+```
+con el nombre:  MIT <-> _black_version  0.341   |  coverage <-> sin tests  0.252
+sin el nombre:  MIT <-> _black_version  0.041   |  coverage <-> sin tests  0.342
+```
+
+Sacar el nombre del proyecto **antes de embeber** invierte el orden y deja a
+los dos del lado correcto del umbral. Lo detectó un test *existente* que
+empezó a fallar, no uno escrito para esto — vale registrarlo porque es
+justamente el tipo de regresión que un cambio "aditivo" puede introducir sin
+que nadie lo note.
+
+**Mutation testing:** 102 mutantes, 44 → 35 sobrevivientes (33 anotaciones
+`X | None` + 2 equivalentes verificados). Descontando equivalentes, 100% de
+los no equivalentes muertos.
+
+El gap más serio estaba **en los tests, no en el código**: el encoder falso
+pre-normalizaba sus vectores, así que la normalización del módulo era un
+no-op en cada test — justo donde vive la lógica no trivial. Con un encoder
+que devuelve normas arbitrarias (como el modelo real) aparecieron cuatro
+gaps reales, incluido que `keepdims=True` necesita *dos vectores de normas
+distintas **y** una nota que ejercite la segunda componente* para notarse:
+con una nota `[1, 0]` el error se cancela por casualidad.
+
+**Lo que todavía NO está demostrado.** Que el Paso 1 se gane el lugar en
+repos reales. La calibración son 11 casos construidos a mano, y el
+"esperado" de cada uno lo decidió quien los escribió — no hay ground truth
+verificable como sí lo había con los secretos, donde se abría el archivo y
+se veía. Falta la tabla de balance sobre `click`, `black` y `requests`:
+cuántas afirmaciones pasaron de "sin evidencia" a "con evidencia", y cuántas
+de esas un humano llamaría correctas. **El Paso 2 no se construye hasta
+tener esos números.**
 
 ### Paso 2 — RAG sobre el código (12-33s) — **condicional**
 
