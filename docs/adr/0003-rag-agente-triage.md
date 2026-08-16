@@ -28,31 +28,130 @@ para `semantic_check.py`:
 - **Nunca deciden el peor veredicto solas** — ver "Mitigación 3" abajo, que
   extiende la regla de ADR 0002 al agente de triage.
 
-## Fase 1 — RAG: indexador de código
+## Fases 1 y 2 — RAG: **rediseñadas antes de implementar**
 
-`auditor/core/rag_index.py`. Parte el código en fragmentos por función/clase
-reusando el mismo `ast` que ya usa `readme_check.py` (ADR 0001) — no un
-segundo parser. Cada fragmento se convierte en vector con un modelo local de
-`sentence-transformers` (corre en la máquina del auditor, no manda código a
-ningún servicio externo). Los vectores viven en un índice FAISS **en
-memoria, solo durante esa corrida** — nada persistente, nada que instalar
-como base de datos, se descarta al terminar el proceso. Expone una función:
+> **Estado: no implementadas.** Este bloque reemplaza el diseño original
+> tras medir el costo real y encontrarle un problema de principio. Lo que
+> decía antes queda registrado en "Qué se descartó y por qué", más abajo —
+> no se borra, porque las razones del descarte son la parte útil.
+
+### El problema de principio que tenía el diseño original
+
+La Fase 2 original decía que los fragmentos recuperados se le pasan al LLM
+*"para juzgar si contradice la afirmación"*. Eso choca de frente con la
+regla fundacional del ADR 0002:
+
+> *"El modelo no juzga verdad. El prompt pide únicamente extracción + cita
+> textual — nunca '¿es cierto que...?'. Verificar si una afirmación es
+> sostenible es exactamente el trabajo que este proyecto entero existe para
+> hacer con evidencia verificable."*
+
+Construirlo tal cual estaba escrito habría hecho que el veredicto dependa de
+la opinión del modelo — justo lo que el proyecto existe para no hacer. No es
+un detalle de implementación: es la premisa.
+
+**Corrección:** el RAG **recupera y localiza**; el veredicto sigue saliendo
+de código determinista. El reporte dice *"esta afirmación no tiene evidencia
+de ningún verificador; el código más relacionado está en `archivo:línea`"* —
+un puntero para quien revisa, no un fallo. Techo
+`APROBADO_CON_OBSERVACIONES`, igual que `semantic_check.py` hoy. Mismo molde
+que el agente de triage: **agrega señal, no veredicto**.
+
+### Costo real, medido
+
+Medido en esta máquina, modelo `all-MiniLM-L6-v2` ya cacheado, dos corridas
+con resultado idéntico:
+
+| Concepto | Tiempo |
+|---|---|
+| `import sentence_transformers` | 4.7s |
+| cargar el modelo | 2.9s |
+| **costo fijo total** | **7.6s** |
+
+| Corpus a embeber | Fragmentos | Embedding | Total con carga |
+|---|---|---|---|
+| solo afirmaciones + notas de evidencia | ~30 | **0.04s** | **7.6s** |
+| `auditkit-cli` (código completo) | 295 | 4.6s | 12s |
+| `psf/requests` (código completo) | 807 | 9.9s | 18s |
+| `psf/black` (código completo) | 3033 | 25.5s | 33s |
+
+**Corrección al número que veníamos usando:** habíamos asumido 45-70s fijos
+por corrida. Es la mitad: **12-33s** según el tamaño del repo, y **7.6s** si
+solo se embeben afirmaciones y notas. El número viejo nunca se había medido.
+
+### Los dos usos tienen perfiles de costo muy distintos
+
+Esa tabla es la que decide el diseño. Embeber afirmaciones y notas es
+**gratis** una vez pagada la carga del modelo (0.04s); embeber el código
+cuesta de 4 a 25 segundos más. Y el barato ataca un bug **documentado**,
+mientras que el caro apunta a un beneficio **especulativo**. Así que se
+parten en dos pasos, y se hace primero el barato.
+
+### Paso 1 — Cruce semántico afirmación ↔ evidencia (7.6s)
+
+Ataca una limitación que el ADR 0002 ya tiene registrada como conocida:
+
+> *"El cruce de keywords es cross-language ciego. Las notas de evidencia de
+> los otros cuatro verificadores están en español; un README en inglés
+> ('100% test coverage') puede no compartir ningún token con una nota como
+> 'README afirma... pero no hay funciones de test'."*
+
+En vez de intersecar tokens, se embeben las afirmaciones extraídas y las
+notas de evidencia ya producidas, y se cruzan por similitud coseno. Son
+~30 strings: 0.04s.
+
+- **Carga perezosa.** El modelo se carga solo si hay al menos una afirmación
+  extraída. Un repo sin README, o sin afirmaciones verificables, paga
+  **cero** — exactamente como el agente de triage no gastó una sola llamada
+  de API en `pallets/click`.
+- **El veredicto no cambia de naturaleza.** Hoy una intersección de keywords
+  no vacía marca "hay evidencia relacionada"; pasa a marcarlo una similitud
+  por encima de un umbral. El resto del pipeline queda igual, techo
+  incluido.
+- **Métrica chequeable:** ¿encuentra contradicciones que el cruce de
+  keywords se perdía? ¿introduce observaciones falsas? Se mide con la misma
+  tabla de balance que se usó para el triage.
+
+### Paso 2 — RAG sobre el código (12-33s) — **condicional**
+
+Solo si el Paso 1 demuestra que la infraestructura de embeddings se gana el
+lugar. Ahí sí `auditor/core/rag_index.py`: fragmentos por función/clase vía
+el `ast` que ya usa `readme_check.py`, vectores en un índice FAISS **en
+memoria** (nada persistente, nada que instalar como base de datos), y
 
 ```python
 def buscar(pregunta: str, k: int = 5) -> list[Fragmento]:
 ```
 
-Ver "Mitigación 1" para el límite de tamaño.
+Se usa cuando una afirmación no obtuvo evidencia de ningún verificador **ni**
+del Paso 1. Recupera el código más relacionado y lo reporta como puntero
+`archivo:línea`, sin pedirle al modelo un veredicto. Límites de tamaño y
+timeout en la Mitigación 1.
 
-## Fase 2 — Conectar el RAG al verificador semántico
+Si el Paso 1 no muestra mejora real, **el Paso 2 no se construye** — y nos
+ahorramos 25s por corrida en repos grandes. Ese también es un resultado
+válido.
 
-Cuando una afirmación extraída por `semantic_check.py` no tiene evidencia
-relacionada de ninguno de los 4 verificadores deterministas, en vez de
-dejarla sin verificar se busca en el índice RAG evidencia de código
-relacionada (`buscar(afirmacion)`) y se la pasa al LLM como contexto
-adicional para juzgar si contradice la afirmación. Esto es lo que lo hace
-RAG de verdad — recuperación real que alimenta la generación, no una
-llamada de IA aislada con el prompt de siempre.
+### Qué se descartó y por qué
+
+**Reducir el corpus a la "superficie de API"** (solo definiciones top-level
+públicas con su firma y docstring, sin cuerpo). La hipótesis era que
+recortaría el corpus 10-50x. **Medido, da 1-4x:**
+
+| Repo | Código completo | Superficie de API | Ratio |
+|---|---|---|---|
+| `auditkit-cli` | 295 | 211 | 1x |
+| `psf/requests` | 807 | 209 | 4x |
+| `psf/black` | 3033 | 1795 | 2x |
+
+En estos repos la mayoría de las funciones ya son top-level y públicas, así
+que había mucho menos que recortar de lo previsto. Ahorraría ~10s en el repo
+más grande, y a cambio perdería los cuerpos de las funciones — que es
+justamente donde vive la evidencia de una afirmación como "thread-safe" (los
+locks están adentro, no en la firma). Mal negocio: se descarta.
+
+Queda anotado porque la hipótesis era razonable y estaba equivocada, y sin
+medirla se habría implementado.
 
 ## Fase 3 — El agente de triage — **IMPLEMENTADA**
 
@@ -96,6 +195,11 @@ que ni siquiera una inyección exitosa pueda llevar el veredicto a
 `APROBADO`.
 
 ## Fase 4 — Integración y validación
+
+> **Estado: cumplida para el agente de triage** (ver resultados abajo). Para
+> el RAG queda pendiente, y se aplica por separado a cada uno de los dos
+> pasos: el Paso 1 tiene que justificar su existencia antes de que se
+> construya el Paso 2.
 
 Correr contra los mismos repos de siempre (`pallets/click`, `psf/black`,
 más `requests` como tercero) y comparar el reporte antes/después de activar
@@ -215,46 +319,54 @@ herramientas con límite duro de iteraciones (ver Mitigación 4).
 
 ### Mitigación 1 — Límite de tamaño del índice RAG
 
-**Problema — medido, no estimado.** Benchmark real en la máquina de
-desarrollo (6 threads de CPU, sin GPU), fragmentando por función/clase con
-`ast` y midiendo el forward pass de la arquitectura exacta de
-`all-MiniLM-L6-v2` (6 capas, hidden 384, 12 heads, seq 256):
+**Actualización: el benchmark original era una simulación y sobreestimaba
+~2.7x.** La primera versión de esta sección midió el forward pass de una
+arquitectura equivalente a `all-MiniLM-L6-v2` reconstruida a mano, porque la
+descarga del modelo real había fallado (`SSL: CERTIFICATE_VERIFY_FAILED`
+contra `huggingface.co`). De ahí salió el número de 45-70s que se venía
+citando.
 
-| Repo | Archivos `.py` | Fragmentos | Parse `ast` | **Embedding** | FAISS build | Query | **Total indexado** |
-|---|---|---|---|---|---|---|---|
-| `pallets/click` | 78 | 1925 | 0.5s | **45.2s** | 0.002s | 0.10ms | **45.7s** |
-| `psf/black` | 342 | 3033 | 1.0s | **67.7s** | 0.002s | 0.11ms | **68.7s** |
+Con `sentence-transformers` y `faiss-cpu` realmente instalados y el modelo
+descargado, los números medidos son:
 
-Conclusiones que cambian el diseño:
+| Concepto | Simulado (viejo) | **Real (medido)** |
+|---|---|---|
+| costo fijo (import + carga del modelo) | no contemplado | **7.6s** |
+| `psf/black` — 3033 fragmentos | 67.7s | **25.5s** |
+| `psf/requests` — 807 fragmentos | — | **9.9s** |
+| `auditkit-cli` — 295 fragmentos | — | **4.6s** |
+| ~30 strings (afirmaciones + notas) | — | **0.04s** |
 
-- **El embedding es el 98% del costo.** FAISS es gratis (2ms para construir
-  el índice, 0.1ms por query) — el cuello de botella es exclusivamente el
-  modelo. Optimizar la parte vectorial no sirve de nada; el único
-  parámetro que importa es *cuántos fragmentos se embeben*.
-- **45-70s es inaceptable como costo fijo.** click y black son repos
-  medianos, no gigantes, y ya suman más de un minuto *antes* de poder
-  auditar nada. Extrapolando linealmente (~23ms/fragmento): 5000
-  fragmentos ≈ 115s, 10000 ≈ 230s. Un repo tipo Django estaría en varios
-  minutos. Como referencia, el pipeline entero hoy corre en segundos salvo
-  `build_check.py`.
-- **Hay un costo de red de primera corrida no contemplado en el plan
-  original.** `sentence-transformers` descarga el modelo (~90MB) de
-  HuggingFace la primera vez. En el entorno donde se hizo este benchmark
-  la descarga **falló** (`SSL: CERTIFICATE_VERIFY_FAILED` contra
-  `huggingface.co`, incluso forzando el bundle de `certifi`). Es decir: el
-  RAG "local" no es local en la primera corrida, y puede fallar por red en
-  entornos con inspección TLS corporativa. Esto contradice parcialmente la
-  premisa "corre en tu máquina, no manda código a ningún lado" — el código
-  no sale, pero sí hace falta salir a buscar el modelo.
+Conclusiones que sobreviven a la medición real:
+
+- **El embedding sigue siendo el grueso del costo variable**, y el único
+  parámetro que importa es cuántos fragmentos se embeben. FAISS es gratis
+  (2ms de construcción, 0.1ms por query).
+- **El costo fijo de cargar el modelo (7.6s) no estaba contemplado** en el
+  benchmark viejo, y es el que domina cuando el corpus es chico. Para el
+  Paso 1 (afirmaciones + notas) es prácticamente el costo total.
+- **La descarga del modelo sí ocurre y sí puede fallar.** `~90MB` desde
+  HuggingFace la primera vez. En este entorno funcionó, pero el fallo por
+  TLS ya se observó una vez, así que sigue siendo un modo de fallo real: el
+  RAG "local" no es local en la primera corrida.
+
+Corrección honesta: el costo es **menos grave de lo que decíamos**, pero
+sigue siendo el argumento principal para partir el trabajo en dos pasos y
+hacer primero el que cuesta 7.6s.
 
 **Mitigación:**
-- **RAG opt-in con flag propio** (`--rag`), separado de `--semantic`. Dado
-  el costo medido, no puede activarse junto con `--semantic` por default:
-  quien pide RAG está aceptando +45-70s como mínimo.
-- Tope duro de fragmentos indexados (**2000**, no 5000 — a 23ms/fragmento
-  eso acota el indexado a ~46s, en el orden del `timeout` de 120s que ya
-  usa `pip-audit`) y de archivos escaneados. Al llegar al límite se corta
-  ahí, no se falla.
+- **RAG opt-in con flag propio** (`--rag`), separado de `--semantic`. Aun
+  con el costo corregido, quien pide RAG sobre código está aceptando
+  **+12-33s** según el tamaño del repo, así que no se activa junto con
+  `--semantic` por default. El Paso 1 (afirmaciones + notas, 7.6s) puede
+  evaluarse aparte: es lo bastante barato como para considerarlo parte de
+  `--semantic`, y esa decisión se toma cuando haya números de si mejora
+  algo.
+- Tope duro de fragmentos indexados (**2000**) y de archivos escaneados. Al
+  ritmo real medido (3033 fragmentos de black en 25.5s ≈ **8.4ms por
+  fragmento**, no los 23ms que estimaba la simulación), 2000 fragmentos son
+  ~17s de indexado — cómodamente por debajo del `timeout` de 120s que ya
+  usa `pip-audit`. Al llegar al límite se corta ahí, no se falla.
 - Timeout de pared para la fase de indexado (mismo patrón que
   `_run_pip_audit`: si no termina a tiempo, el RAG se salta para esa
   corrida).
@@ -273,20 +385,6 @@ Conclusiones que cambian el diseño:
   verificar" de "verificado, limpio" (ADR 0001).
 - Encoding en batch (medido con `batch_size=64`), no fragmento por
   fragmento.
-
-**Mitigación:**
-- Tope duro de fragmentos indexados (ej. 5000) y de archivos escaneados
-  (ej. 2000) — al llegar al límite, se corta el indexado ahí, no se falla.
-- Timeout de pared para la fase de indexado completa (mismo patrón que
-  `_run_pip_audit`: si no termina a tiempo, el RAG se salta para esa
-  corrida).
-- Cuando se corta por tamaño o timeout, el veredicto no se ve afectado
-  silenciosamente: se agrega una nota explícita ("RAG no indexado - repo
-  supera el límite de tamaño" / "timeout de indexado") a las afirmaciones
-  que hubieran usado RAG, igual que `deps_check.py` distingue "no se pudo
-  verificar" de "verificado, limpio" (ADR 0001).
-- Encoding en batch (no fragmento por fragmento) para aprovechar lo que da
-  la CPU sin agregar dependencia de GPU.
 
 ### Mitigación 2 — Protección contra path traversal en el agente de triage
 
@@ -424,9 +522,15 @@ triage no es una llamada por corrida: es
 `hallazgos_ambiguos × iteraciones × latencia_LLM`. Con 20 hallazgos
 ambiguos (plausible en un repo grande — black hoy produce 4 de `secrets` y
 20 de `deps_check`), 5 iteraciones y ~2s por llamada, son ~200s **además**
-de los 45-70s del RAG. Los tres topes de arriba tienen que multiplicarse
-entre sí y quedar por debajo de un presupuesto total explícito, no
-definirse cada uno por separado sin mirar el producto.
+de los 12-33s del RAG sobre código. Los tres topes de arriba tienen que
+multiplicarse entre sí y quedar por debajo de un presupuesto total
+explícito, no definirse cada uno por separado sin mirar el producto.
+
+*(Los topes finalmente implementados — 3 iteraciones, 10 hallazgos, 20s de
+timeout — acotan el peor caso del triage a ~600s teóricos, y en la práctica
+las corridas contra black y requests tardaron segundos porque el modelo casi
+nunca usa las 3 iteraciones. El límite que de verdad mordió fue otro: la
+cuota diaria de la API.)*
 
 **Aislamiento del pipeline (aplica a las dos piezas).** Hoy `orchestrator.run()`
 corre los verificadores en un `dict` comprehension secuencial
@@ -445,10 +549,22 @@ Con la mano en el corazón, defendible ante un entrevistador técnico **si
 se implementa tal como está especificado acá** — no es decoración:
 
 - **RAG genuino**: hay recuperación real (embedding + similitud vectorial
-  sobre fragmentos reales del código, vía FAISS) que alimenta una
-  generación real (el LLM de `semantic_check.py` recibe los fragmentos
-  recuperados como contexto). No es "le pedimos al LLM que adivine" — hay
-  un paso de recuperación verificable entre medio.
+  sobre contenido real del repo) alimentando lo que sale en el reporte. No
+  es "le pedimos al LLM que adivine" — hay un paso de recuperación
+  verificable entre medio.
+
+  Con una salvedad que el rediseño introduce y conviene decir en voz alta:
+  al sacarle al modelo la decisión de veredicto (ver "El problema de
+  principio" arriba), lo que queda es **recuperación semántica alimentando
+  un reporte**, no "recuperación alimentando generación" en el sentido
+  estricto de la sigla. Es más honesto describirlo así que estirar el
+  término. Sigue siendo la parte difícil e interesante — el índice, el
+  embedding, el umbral de similitud, la evaluación de si mejora algo — y
+  además es la versión *correcta* para este proyecto, donde ceder el
+  veredicto al modelo sería contradecir la premisa. Si en una entrevista
+  la pregunta es "¿esto es RAG?", la respuesta buena es: *"la recuperación
+  es real y medida; la generación la sacamos a propósito, y este documento
+  explica por qué"*.
 - **Agente genuino**: hay un loop real de observación → decisión → acción
   (tool call → leer resultado → decidir si seguir o parar), no una llamada
   fija con un nombre más grande. La honestidad correcta hacia afuera es
@@ -461,6 +577,24 @@ se implementa tal como está especificado acá** — no es decoración:
   severidad, la pieza es real pero su aporte es marginal. Fase 4 existe
   específicamente para medir eso antes de afirmar que "mejora" el reporte
   — no alcanza con que las piezas corran sin explotar.
+
+  **Ya hay un dato duro sobre esto, del agente de triage:** en
+  `pallets/click` el aporte fue exactamente **cero** (reporte idéntico byte
+  a byte), porque el repo no tiene hallazgos ambiguos. En `psf/black` y
+  `psf/requests` acertó 5 de 7. Ese es el rango realista de una pieza
+  aditiva bien construida, y es la vara con la que hay que medir el RAG: no
+  "¿funciona?" sino "¿en cuántos repos reales cambia algo, y cuántas veces
+  se equivoca?".
+
+- **Dificultad de medición que el triage no tenía.** Con los secretos hay
+  ground truth: se abre el archivo y se ve si era una credencial o un hash
+  de commit. *"¿Es cierto que esta librería es thread-safe?"* no tiene esa
+  respuesta chequeable. La tabla de balance del RAG va a ser
+  necesariamente más blanda que la del triage, y conviene saberlo **antes**
+  de prometer que se va a medir con el mismo rigor. Lo que sí es
+  chequeable: cuántas afirmaciones pasaron de "sin evidencia" a "con
+  puntero", y si esos punteros apuntan a código que un humano juzgaría
+  relacionado.
 
 ### Mutation testing de `triage_agent.py`
 
