@@ -113,7 +113,23 @@ notas de evidencia ya producidas, y se cruzan por similitud coseno. Son
   keywords se perdía? ¿introduce observaciones falsas? Se mide con la misma
   tabla de balance que se usó para el triage.
 
-#### Resultado — **IMPLEMENTADO** (`auditor/core/embedding_index.py`)
+#### Resultado — **CONSTRUIDO, MEDIDO Y RETIRADO**
+
+> **No está en `master`.** Se implementó completo (con tests y mutation
+> testing), se midió contra `click`, `black` y `requests`, y la medición lo
+> descartó — la tabla y el diagnóstico están más abajo. El PR se cerró sin
+> mergear: el cruce **no** queda detrás de un flag, porque un camino que mide
+> 18 falsos positivos y 0 verdaderos no mejora por estar apagado por defecto.
+>
+> Lo que sí sobrevive es `auditor/core/embedding_index.py`, la primitiva de
+> similitud: no era la parte equivocada. Entra a `master` en el PR del
+> comando `--ask`, donde recuperar y **ordenar** fragmentos de código es
+> exactamente lo que corresponde hacer con ella. La lección no es "los
+> embeddings no sirven acá" sino **"no se usa el score de recuperación como
+> si fuera el juicio"**.
+>
+> Lo que sigue en esta sección es el diseño tal como se construyó, porque
+> las razones por las que parecía razonable son la parte útil del registro.
 
 **Umbral calibrado, no elegido a ojo.** 11 pares reales (afirmaciones típicas
 de README contra las notas que producen los 4 verificadores), medidos con el
@@ -325,15 +341,24 @@ equivocada.
 
 #### Consecuencia
 
-**El Paso 2 queda descartado, no pospuesto** (ver abajo). Y el Paso 1 tal
-como está implementado no debería mergearse: agrega 18 observaciones falsas
-y 0 verdaderas sobre tres repos reales, en una herramienta cuyo propósito
-declarado es no dejar pasar afirmaciones sin respaldo. Un verificador que
-inventa contradicciones es peor que no tenerlo.
+**El Paso 2 queda descartado, no pospuesto** (ver abajo). Y el Paso 1 no se
+mergea: agrega 18 observaciones falsas y 0 verdaderas sobre tres repos
+reales, en una herramienta cuyo propósito declarado es no dejar pasar
+afirmaciones sin respaldo. Un verificador que inventa contradicciones es
+peor que no tenerlo.
 
-Queda pendiente de decisión humana qué se hace con el código del Paso 1
-(revertir, o dejarlo apagado por defecto). La medición no decide eso; sí
-decide que encendido por defecto no va.
+**Decidido: el PR se cierra sin mergear y el cruce no queda detrás de
+ningún flag.** Dejarlo apagado por defecto habría sido conservar en el repo
+un camino que ya sabemos que miente, apostando a que nadie lo encienda; y el
+costo de volver a escribirlo, si algún día una medición lo justificara, es
+menor que el de mantenerlo. `embedding_index.py` se conserva y se reusa en
+`--ask`.
+
+**La regla que queda escrita, y que vale más que este experimento:** la
+recuperación *localiza*, no *juzga*. Un mecanismo de similitud puede decir
+"esto habla del mismo tema"; no puede decir "esto es falso". Cada vez que se
+use recuperación en este proyecto, el veredicto tiene que salir de código
+determinista o no salir.
 
 ### Paso 2 — RAG sobre el código (12-33s) — **DESCARTADO**
 
