@@ -318,10 +318,59 @@ def test_locate_quote_on_first_line_returns_one() -> None:
     assert semantic_check._locate_quote(text, "TARGET al principio") == 1
 
 
-def test_locate_quote_not_found_falls_back_to_one() -> None:
+def test_locate_quote_not_found_returns_none_instead_of_inventing_line_one() -> None:
+    # Este test reemplaza a uno que asertaba `== 1`, o sea que fijaba el bug
+    # como comportamiento esperado. Devolver 1 ante una cita que no esta en el
+    # README es fabricar una ubicacion.
     text = "a\nb\nc\nd\n"
 
-    assert semantic_check._locate_quote(text, "esto no esta en el texto") == 1
+    assert semantic_check._locate_quote(text, "esto no esta en el texto") is None
+
+
+def test_verify_cita_alucinada_no_inventa_una_ubicacion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El modelo devuelve una `cita_textual_del_readme` que no esta en el README.
+
+    Antes el reporte decia `README.md:1 — README dice "<texto inventado>"`:
+    una ubicacion fabricada y una atribucion falsa, en la herramienta cuyo
+    proposito es no dejar pasar afirmaciones sin respaldo.
+    """
+    (tmp_path / "README.md").write_text(
+        "# demo\n\nThis project has complete test coverage.\n"
+    )
+    content = _claims_payload(
+        ("complete test coverage", "Esta cita jamas aparece literal en el README.")
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "readme_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(
+                    file="README.md",
+                    line=3,
+                    note='README afirma "coverage" pero no hay funciones de test en el repo',
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert len(result.evidence) == 1
+    hallazgo = result.evidence[0]
+
+    # 0 = "sin linea", la misma convencion que usa el resto del proyecto.
+    # Cualquier numero de linea aca seria inventado.
+    assert hallazgo.line == 0
+    assert "cita no localizada" in hallazgo.note
+    # No se le puede atribuir al README algo que el README no dice.
+    assert "README dice" not in hallazgo.note
+    # Y la evidencia real no se pierde: sigue citada con su archivo:linea.
+    assert "no hay funciones de test" in hallazgo.note
+    assert "README.md:3" in hallazgo.note
 
 
 def test_verify_no_claims_is_aprobado(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
