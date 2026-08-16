@@ -1,9 +1,32 @@
+import itertools
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 _NAME_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]+")
+
+_TEST_FIXTURE_DIR_NAMES = frozenset({"tests", "test"})
+_TEST_FIXTURE_SUBDIR_NAMES = frozenset({"data", "fixtures"})
+
+
+def is_test_fixture_path(relative_parts: tuple[str, ...]) -> bool:
+    """tests/data/ y tests/fixtures/ (a cualquier profundidad debajo) son la
+    convencion del ecosistema para guardar codigo de ejemplo usado COMO DATO
+    de un test, no codigo real del proyecto. psf/black tiene una carpeta
+    entera, tests/data/cases/, con archivos .py que son literalmente input
+    de prueba para el formateador - contienen `import foo`, `import hello`,
+    nombres inventados a proposito, y el ast scan los leia como si fueran
+    dependencias reales del propio black.
+
+    Vive aca y no en `deps_check.py` por la misma razon que
+    `declared_project_names`: lo comparten dos consumidores (`deps_check.py`
+    y `symbol_index.py`) y `core/` no puede depender de `verifiers/`."""
+    lowered = [part.lower() for part in relative_parts]
+    return any(
+        a in _TEST_FIXTURE_DIR_NAMES and b in _TEST_FIXTURE_SUBDIR_NAMES
+        for a, b in itertools.pairwise(lowered)
+    )
 
 
 def normalize_dependency_name(name: str) -> str:
