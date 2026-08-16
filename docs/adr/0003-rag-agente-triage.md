@@ -118,7 +118,38 @@ medir si el agente sirve: 4 de 4 deberían bajar.
 |---|---|---|
 | 1 — agente recién implementado | **0 / 4** | — |
 | 2 — radio de contexto por defecto 10 → 25 | **2 / 4** | Con radio chico el delimitador `"""` del docstring queda fuera de la ventana; el modelo no puede ver que mira documentación. Verificado leyendo el contexto a radios 3/10/25. |
-| 3 — hecho estructural vía `ast` | **pendiente de cuota de Groq** | Ver abajo. |
+| 3 — hecho estructural vía `ast` | **3 / 4** | Medido con una corrida real completa (`py -m auditor https://github.com/psf/black --triage`), no inferido de tests unitarios. |
+
+**El 4/4 no se alcanzó, y el caso que queda es distinto en especie.** Los
+tres que ahora sí se bajan (158, 213, 277) son ejemplos hex dentro de
+docstrings, y de eso `ast` puede afirmar un hecho fuerte: *"la línea cae
+dentro del docstring de la función X"*. El cuarto
+(`tests/test_ipynb.py:367`) es el hash del intérprete de Jupyter dentro de un
+blob de JSON usado como fixture — no es un docstring, así que lo más fuerte
+que `ast` puede afirmar es *"está dentro de la función `test_...`"*.
+
+Esa señal es genuinamente más débil, y el agente se mantiene conservador. Es
+defendible: un archivo de tests puede filtrar una credencial real igual que
+cualquier otro, y el costo de equivocarse es asimétrico (un falso positivo lo
+revisa un humano; un falso negativo deja una credencial sin reportar). Se
+deja marcado como `xfail` con esa explicación en vez de tunear el prompt
+hasta que pase — eso sería memorizar este caso, no resolver el problema.
+
+Salida real de la corrida:
+
+```
+## secrets ❌ NO_SOSTENIBLE
+- src\black\handle_ipynb_magics.py:277 — Hex High Entropy String — triage: probablemente no es un secreto (aparece como ejemplo dentro de documentacion)
+- src\black\handle_ipynb_magics.py:213 — Hex High Entropy String — triage: probablemente no es un secreto (aparece como ejemplo dentro de documentacion)
+- src\black\handle_ipynb_magics.py:158 — Hex High Entropy String — triage: probablemente no es un secreto (aparece como ejemplo dentro de documentacion)
+- tests\test_ipynb.py:367 — Hex High Entropy String
+```
+
+Nótese que el veredicto sigue siendo `NO_SOSTENIBLE`: queda un hallazgo sin
+descartar, y la Mitigación 3 exige que eso mantenga la severidad. El valor
+del agente acá no es cambiar el veredicto — es que tres de los cuatro
+hallazgos ahora llegan al reporte con una explicación de por qué
+probablemente son ruido, y el humano que lo revisa sabe cuál mirar primero.
 
 **Por qué la iteración 2 se quedó en 2/4 y no fue un problema de prompt.**
 Los 4 hallazgos son estructuralmente equivalentes, y el agente clasificaba
@@ -158,12 +189,15 @@ decirle al modelo "está dentro de un string" lo empujaría a descartar una
 credencial real. Hay un test que fija ese límite, y el control directo
 confirma que ese caso devuelve `None`.
 
-**Lo que todavía no está demostrado:** que el modelo, con el hecho
-estructural servido, efectivamente acierte 4/4. `ast` entrega el dato
-correcto — eso está verificado — pero que el modelo lo use bien es una
-hipótesis sin confirmar. La verificación end-to-end quedó bloqueada por
-agotamiento de la cuota diaria de Groq (429, `99852/100000 tokens per
-day`). No se da por hecho.
+**Resultado final: 3/4, no 4/4** — ver la tabla y la explicación arriba. La
+hipótesis de que el modelo usaría bien el dato estructural se confirmó para
+los tres casos de docstring y no para el cuarto, que es de otra especie.
+
+Los cinco tests contra la API real quedaron verificados, incluidos los dos
+controles de regresión que importaban (el hash de commit pineado se sigue
+bajando; la credencial real se sigue manteniendo) y el de resistencia a
+inyección de prompt. La validación tardó tres intentos por la cuota diaria de
+Groq (100k tokens/día), no por el código.
 
 Nota lateral, encontrada por accidente en condiciones reales: el
 `RateLimitError` de Groq es subclase de `groq.APIError`, así que la
