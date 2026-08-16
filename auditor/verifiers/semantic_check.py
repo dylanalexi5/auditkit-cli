@@ -124,10 +124,23 @@ def _project_name_tokens(path: Path) -> frozenset[str]:
     return frozenset(tokens)
 
 
-def _locate_quote(readme_text: str, quote: str) -> int:
+def _locate_quote(readme_text: str, quote: str) -> int | None:
+    """Linea donde arranca la cita, o None si no aparece literal en el README.
+
+    Antes devolvia 1 cuando no la encontraba. Eso fabricaba una ubicacion: el
+    modelo puede alucinar `cita_textual_del_readme` —el prompt le pide texto
+    exacto, pero nada garantiza que obedezca— y el reporte terminaba diciendo
+    `README.md:1 — README dice "<texto que el README no dice>"`. Dos mentiras
+    en una linea, en la herramienta que existe para no dejar pasar
+    afirmaciones sin respaldo.
+
+    None no se traduce en descartar la afirmacion: la evidencia que la
+    contradice puede ser real aunque la cita este mal transcrita. Se reporta
+    sin ubicacion y marcada para revision manual.
+    """
     index = readme_text.find(quote)
     if index == -1:
-        return 1
+        return None
     return readme_text.count("\n", 0, index) + 1
 
 
@@ -171,15 +184,18 @@ def verify(ctx: RepoContext, other_results: dict[str, VerifierResult]) -> Verifi
         contradicting = _find_contradicting_evidence(claim_keywords, other_results, exclude)
         if contradicting is None:
             continue
-        evidence.append(
-            Evidence(
-                file=readme_path.name,
-                line=_locate_quote(readme_text, cita),
-                note=(
-                    f'README dice "{cita}" pero hay evidencia que lo contradice: '
-                    f"{contradicting.file}:{contradicting.line} — {contradicting.note}"
-                ),
+        linea = _locate_quote(readme_text, cita)
+        contra = f"{contradicting.file}:{contradicting.line} — {contradicting.note}"
+        if linea is None:
+            nota = (
+                f'cita no localizada en el README, verificar manualmente: "{cita}" '
+                f"— el modelo la atribuyó al README pero no aparece literal. "
+                f"Evidencia relacionada: {contra}"
             )
+        else:
+            nota = f'README dice "{cita}" pero hay evidencia que lo contradice: {contra}'
+        evidence.append(
+            Evidence(file=readme_path.name, line=0 if linea is None else linea, note=nota)
         )
 
     verdict = Verdict.APROBADO_CON_OBSERVACIONES if evidence else Verdict.APROBADO
