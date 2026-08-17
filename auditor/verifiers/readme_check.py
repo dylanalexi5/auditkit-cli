@@ -98,14 +98,27 @@ def _fragmentos_de_codigo(readme_text: str):
 def _vive_dentro_de_una_ruta(fragmento: str, inicio: int, fin: int) -> bool:
     """Si el `a.b` que matcheó es en realidad un pedazo de URL o de ruta.
 
-    Se miran los dos caracteres pegados al match y nada más: un separador de
-    ruta justo antes (`.../psf/requests.git`) o una URL que continúa justo
-    después (`demo.example.com/x`).
+    Dos señales, y el alcance de cada una importa:
+
+    - Un separador de ruta **justo antes**: `.../psf/requests.git`.
+    - Una barra o dos puntos al final de la **cadena punteada** que empieza
+      en el match: `demo.example.com/api`. No alcanza con mirar el carácter
+      pegado, porque ahí hay un punto — hay que recorrer hasta donde termina
+      la cadena de identificadores. Y tampoco se puede mirar el token entero
+      separado por espacios: `demo.get('https://httpbin.org/x')` tiene barras
+      en el ARGUMENTO, y mirar tan lejos dejó a `psf/requests` sin una sola
+      cita revisada.
     """
     anterior = fragmento[inicio - 1] if inicio > 0 else ""
-    siguiente = fragmento[fin] if fin < len(fragmento) else ""
     if anterior and anterior in _SEPARADOR_DE_RUTA:
         return True
+
+    limite = fin
+    while limite < len(fragmento) and (
+        fragmento[limite].isalnum() or fragmento[limite] in "._"
+    ):
+        limite += 1
+    siguiente = fragmento[limite] if limite < len(fragmento) else ""
     return bool(siguiente) and siguiente in _SIGUE_LA_URL
 
 

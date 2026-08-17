@@ -1,5 +1,9 @@
+import dataclasses
 from pathlib import Path
 
+import pytest
+
+from auditor.core import symbol_index
 from auditor.core.models import Verdict
 from auditor.core.repo_context import RepoContext
 from auditor.verifiers import readme_check
@@ -260,6 +264,142 @@ def test_un_fence_sin_lenguaje_no_se_revisa(tmp_path: Path) -> None:
     result = readme_check.verify(ctx)
 
     assert result.evidence == []
+
+
+# ---------------------------------------------------------------------------
+# Huecos que encontro el mutation testing. Cada uno mata un mutante concreto
+# que sobrevivio a la primera corrida.
+# ---------------------------------------------------------------------------
+
+
+def test_la_linea_se_cuenta_desde_el_principio_del_readme(tmp_path: Path) -> None:
+    """`count("\\n", 0, offset)` -> `count("\\n", 1, offset)` sobrevivia. El
+    README empieza con salto de linea a proposito: con cualquier otro texto
+    los dos arrancan en el mismo punto util y la diferencia queda invisible."""
+    ctx = _repo_demo(tmp_path, "\n# demo\n\n```python\nfrom demo import fantasma\n```\n")
+
+    result = readme_check.verify(ctx)
+
+    assert [e.line for e in result.evidence] == [5]
+
+
+def test_una_url_que_sigue_despues_del_nombre_no_es_un_atributo(
+    tmp_path: Path,
+) -> None:
+    """La regla del caracter POSTERIOR, que ningun test ejercitaba: en
+    `demo.example.com/x` lo que descalifica la cita es la barra que sigue, no
+    un separador previo (antes de `demo` hay una comilla). Sin ella
+    sobrevivian los ocho mutantes de esa comparacion."""
+    ctx = _repo_demo(tmp_path, "# demo\n\n```python\nURL = 'demo.example.com/api'\n```\n")
+
+    result = readme_check.verify(ctx)
+
+    assert result.evidence == []
+
+
+def test_un_import_de_submodulo_se_atribuye_al_paquete_raiz(tmp_path: Path) -> None:
+    """`modulo.split(".")[0]` -> `[-1]` sobrevivia. Con `[-1]`, un
+    `from demo.sub import X` se atribuiria al paquete `sub`, que no existe, y
+    la cita se saltearia por no estar en el espacio propio."""
+    ctx = _repo_demo(
+        tmp_path,
+        "# demo\n\n```python\nfrom demo.sub import fantasma\n```\n",
+    )
+
+    result = readme_check.verify(ctx)
+
+    # Dos citas, las dos ausentes: el submodulo `sub` y el nombre `fantasma`.
+    # Lo que mata al mutante es que `fantasma` este atribuido a `demo` y no a
+    # `sub` -- con `[-1]` el paquete seria `sub`, que no esta en el espacio
+    # propio, y la cita del import se saltearia entera.
+    assert [e.line for e in result.evidence] == [4, 4]
+    assert any("demo.fantasma" in e.note for e in result.evidence)
+
+
+def test_un_import_ajeno_no_corta_la_revision_de_los_que_siguen(
+    tmp_path: Path,
+) -> None:
+    """`continue` -> `break` en la guarda de paquete ajeno."""
+    ctx = _repo_demo(
+        tmp_path,
+        "# demo\n\n```python\nfrom os import path\nfrom demo import fantasma\n```\n",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert [e.line for e in result.evidence] == [5]
+
+
+def test_un_atributo_ajeno_no_corta_la_revision_de_los_que_siguen(
+    tmp_path: Path,
+) -> None:
+    """`continue` -> `break` en la guarda de atributo ajeno."""
+    ctx = _repo_demo(
+        tmp_path,
+        "# demo\n\n```python\nos.path.join('a')\ndemo.fantasma()\n```\n",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert [e.line for e in result.evidence] == [5]
+
+
+def test_una_url_no_corta_la_revision_de_los_que_siguen(tmp_path: Path) -> None:
+    """`continue` -> `break` en la guarda de URL."""
+    ctx = _repo_demo(
+        tmp_path,
+        "# demo\n\n```python\nU = 'https://x.io/demo.git'\ndemo.fantasma()\n```\n",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert [e.line for e in result.evidence] == [5]
+
+
+def test_una_cita_repetida_no_corta_las_distintas_que_siguen(
+    tmp_path: Path,
+) -> None:
+    """`continue` -> `break` en la deduplicacion. La primera y la segunda son
+    la misma cita en la misma linea; la tercera es distinta y tiene que salir
+    igual."""
+    ctx = _repo_demo(
+        tmp_path,
+        "# demo\n\n```python\ndemo.uno() ; demo.uno()\ndemo.dos()\n```\n",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert [(e.line, "uno" in e.note, "dos" in e.note) for e in result.evidence] == [
+        (4, True, False),
+        (5, False, True),
+    ]
+
+
+def test_con_el_indice_truncado_no_se_acusa_de_nada(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Con el indice cortado por el tope, "no esta en la tabla" significa "no
+    lo miramos", no "no existe". Se deja constancia sin ubicacion inventada.
+
+    Los mutantes `line=0` -> `line=1` / `line=-1` sobrevivian porque ningun
+    test de este modulo llegaba a la rama de truncado."""
+    ctx = _repo_demo(
+        tmp_path,
+        "# demo\n\n```python\nfrom demo import fantasma\n```\n",
+    )
+    original = symbol_index.construir
+    monkeypatch.setattr(
+        symbol_index,
+        "construir",
+        lambda root, **kw: dataclasses.replace(original(root), truncado=True),
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].file == "(sin verificar)"
+    assert result.evidence[0].line == 0
+    assert "no se verificaron" in result.evidence[0].note
 
 
 def test_sin_pyproject_el_paquete_importable_del_repo_alcanza(tmp_path: Path) -> None:

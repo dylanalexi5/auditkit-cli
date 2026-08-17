@@ -127,6 +127,12 @@ def construir(root: Path, max_archivos: int = _MAX_ARCHIVOS) -> Indice:
     truncado = False
 
     for py_file in sorted(root.rglob("*.py")):
+        # `rglob("*.py")` también devuelve DIRECTORIOS que terminan en `.py`.
+        # No es hipotético: leerlos revienta con PermissionError en Windows y
+        # con IsADirectoryError en POSIX, y este verificador corre por defecto
+        # sobre repos ajenos. Lo encontró un test de mutation testing.
+        if not py_file.is_file():
+            continue
         partes = py_file.relative_to(root).parts
         if is_test_fixture_path(partes):
             continue
@@ -139,7 +145,7 @@ def construir(root: Path, max_archivos: int = _MAX_ARCHIVOS) -> Indice:
 
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8", errors="ignore"))
-        except (SyntaxError, ValueError):
+        except (SyntaxError, ValueError, OSError):
             continue
 
         relativo = "/".join(partes)

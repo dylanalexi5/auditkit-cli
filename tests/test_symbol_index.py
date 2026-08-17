@@ -5,7 +5,10 @@ un verificador, y quien la usa (`readme_check.py`) tiene sus propios tests.
 Fixtures inline con `tmp_path`, sin conftest, como el resto del repo.
 """
 
+import dataclasses
 from pathlib import Path
+
+import pytest
 
 from auditor.core import symbol_index
 
@@ -201,3 +204,106 @@ def test_construir_no_marca_truncado_si_entra_todo(tmp_path: Path) -> None:
     indice = symbol_index.construir(tmp_path, max_archivos=3)
 
     assert indice.truncado is False
+
+
+# ---------------------------------------------------------------------------
+# Huecos que encontro el mutation testing. Cada uno mata un mutante concreto
+# que sobrevivio a la primera corrida.
+# ---------------------------------------------------------------------------
+
+
+def test_el_indice_es_inmutable(tmp_path: Path) -> None:
+    """`frozen=True` -> `frozen=False` sobrevivia. El resto del proyecto usa
+    dataclasses congeladas y la evidencia depende de que nadie las reescriba
+    a mitad de camino."""
+    indice = symbol_index.construir(tmp_path)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        indice.truncado = True  # type: ignore[misc]
+
+
+def test_un_directorio_con_nombre_terminado_en_py_no_pierde_el_sufijo(
+    tmp_path: Path,
+) -> None:
+    """`len(partes) == 1` -> `>= 1` sobrevivia. Con `>=`, a un paquete cuyo
+    directorio se llama `pkg.py` se le recortaria el sufijo y quedaria
+    indexado como `pkg`, que es un paquete distinto."""
+    paquete = tmp_path / "pkg.py"
+    paquete.mkdir()
+    (paquete / "mod.py").write_text("def f():\n    pass\n", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("pkg.py", "f") == [("pkg.py/mod.py", 1)]
+    assert indice.resuelve("pkg", "f") == []
+
+
+def test_un_fixture_no_corta_el_recorrido_de_los_archivos_que_siguen(
+    tmp_path: Path,
+) -> None:
+    """`continue` -> `break` sobrevivia porque el fixture del otro test queda
+    ULTIMO en orden alfabetico. Aca `tests/data/` va antes que `zz.py`, asi
+    que un `break` se llevaria puesto el archivo real."""
+    datos = tmp_path / "tests" / "data"
+    datos.mkdir(parents=True)
+    (datos / "caso.py").write_text("def de_fixture():\n    pass\n", encoding="utf-8")
+    (tmp_path / "zz.py").write_text("def posterior():\n    pass\n", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("zz", "posterior") == [("zz.py", 1)]
+
+
+def test_un_archivo_sin_nombre_no_corta_el_recorrido(tmp_path: Path) -> None:
+    """`continue` -> `break` en la guarda de `raiz is None`. Un archivo
+    llamado `.py` no tiene nombre importable; ordena antes que cualquier otro,
+    asi que un `break` dejaria el indice vacio."""
+    (tmp_path / ".py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "real.py").write_text("def existe():\n    pass\n", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("real", "existe") == [("real.py", 1)]
+
+
+def test_el_tope_corta_tambien_por_encima_del_cache_de_enteros(
+    tmp_path: Path,
+) -> None:
+    """`>=` -> `is` sobrevivia con topes chicos: CPython cachea los enteros
+    -5..256, asi que `len(leidos) is 3` funciona por accidente. Con un tope
+    por encima del cache, `is` compara identidad de dos objetos distintos, da
+    siempre False, y el tope no corta nunca -- justo en los repos grandes,
+    que son la razon de que el tope exista."""
+    for i in range(260):
+        (tmp_path / f"m{i:03d}.py").write_text("x = 1\n", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path, max_archivos=257)
+
+    assert len(indice.archivos_leidos) == 257
+    assert indice.truncado is True
+
+
+def test_un_modulo_que_ordena_antes_que_init_se_registra(tmp_path: Path) -> None:
+    """`!=` -> `>` / `>=` sobrevivia. Comparar strings con `>` en vez de `!=`
+    descarta cualquier modulo cuyo nombre ordene antes que "__init__": las
+    mayusculas van antes que el guion bajo en ASCII."""
+    paquete = tmp_path / "demo"
+    paquete.mkdir()
+    (paquete / "__init__.py").write_text("")
+    (paquete / "API.py").write_text("def f():\n    pass\n", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("demo", "API") == [("demo/API.py", 1)]
+
+
+def test_init_no_se_registra_como_nombre_del_paquete(tmp_path: Path) -> None:
+    """`!=` -> `is not` sobrevivia: comparar strings por identidad da siempre
+    True, asi que `__init__` entraba como si fuera un submodulo citable."""
+    paquete = tmp_path / "demo"
+    paquete.mkdir()
+    (paquete / "__init__.py").write_text("")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("demo", "__init__") == []
