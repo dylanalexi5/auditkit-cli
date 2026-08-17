@@ -206,6 +206,28 @@ def test_un_vector_nulo_no_produce_nan() -> None:
     assert not np.isnan(resultado[0][1])
 
 
+def test_el_epsilon_se_suma_y_no_se_resta() -> None:
+    """`+ 1e-12` -> `- 1e-12` sobrevivía, y con un vector NULO no se nota: 0
+    dividido por cualquier cosa sigue siendo 0.
+
+    Hace falta una norma diminuta pero **distinta de cero**. Con 1e-20 el
+    denominador correcto queda en +1e-12 y el mutado en -1e-12, así que el
+    vector se da vuelta. Como `rankear` normaliza la consulta y los
+    candidatos por separado, dar vuelta uno solo invierte el signo de todas
+    las similitudes — y con eso, el orden.
+
+    (En `cruzar()`, que ya no existe, este mismo mutante SÍ era equivalente:
+    ahí los dos lados se daban vuelta y el signo se cancelaba. La conclusión
+    vieja no se hereda cuando cambia el código.)
+    """
+    encoder = _encoder_crudo({"p": [1e-20, 0.0], "x": [1.0, 0.0], "y": [0.0, 1.0]})
+
+    resultado = embedding_index.rankear("p", ["x", "y"], top_n=2, encoder=encoder)
+
+    assert [indice for indice, _ in resultado] == [0, 1]
+    assert resultado[0][1] > 0
+
+
 # --- Degradación con gracia ------------------------------------------------
 
 

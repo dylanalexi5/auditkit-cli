@@ -3,7 +3,10 @@
 Fixtures inline con `tmp_path`, sin conftest, como el resto del repo.
 """
 
+import dataclasses
 from pathlib import Path
+
+import pytest
 
 from auditor.core import code_chunks
 
@@ -137,3 +140,96 @@ def test_el_texto_de_un_fragmento_gigante_se_recorta(tmp_path: Path) -> None:
     corpus = code_chunks.extraer(tmp_path)
 
     assert len(corpus.fragmentos[0].texto) == 1500
+
+
+# ---------------------------------------------------------------------------
+# Huecos que encontro el mutation testing.
+# ---------------------------------------------------------------------------
+
+
+def test_los_fragmentos_y_el_corpus_son_inmutables(tmp_path: Path) -> None:
+    """`frozen=True` -> `False` sobrevivia en las dos dataclasses. El resto
+    del proyecto usa dataclasses congeladas y la evidencia depende de que
+    nadie las reescriba a mitad de camino."""
+    _escribir(tmp_path / "mod.py", "def f():\n    pass\n")
+
+    corpus = code_chunks.extraer(tmp_path)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        corpus.truncado = True  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        corpus.fragmentos[0].line = 99  # type: ignore[misc]
+
+
+def test_un_fixture_no_corta_el_recorrido_de_los_archivos_que_siguen(
+    tmp_path: Path,
+) -> None:
+    """`continue` -> `break` sobrevivia porque en el otro test el archivo real
+    ordena ANTES que tests/. Aca `zz.py` va despues, asi que un break se lo
+    llevaria puesto."""
+    _escribir(tmp_path / "tests" / "data" / "caso.py", "def de_fixture():\n    pass\n")
+    _escribir(tmp_path / "zz.py", "def posterior():\n    pass\n")
+
+    corpus = code_chunks.extraer(tmp_path)
+
+    assert [f.file for f in corpus.fragmentos] == ["zz.py"]
+
+
+def test_cuenta_los_archivos_efectivamente_leidos(tmp_path: Path) -> None:
+    """`archivos += 1` -> `+= 2` / `+= 0` sobrevivian: el numero se reporta al
+    usuario ("37 archivos indexados") y ningun test lo miraba. El archivo roto
+    no cuenta, porque no se llego a leer."""
+    _escribir(tmp_path / "uno.py", "def a():\n    pass\n")
+    _escribir(tmp_path / "dos.py", "def b():\n    pass\n")
+    _escribir(tmp_path / "roto.py", "def (((:\n")
+
+    corpus = code_chunks.extraer(tmp_path)
+
+    assert corpus.archivos_leidos == 2
+
+
+def test_sigue_recorriendo_archivos_mientras_no_haya_truncado(
+    tmp_path: Path,
+) -> None:
+    """`if truncado:` -> `if not truncado:` sobrevivia porque en los demas
+    fixtures solo UN archivo aportaba fragmentos. Con la negacion, el
+    recorrido corta despues del primero."""
+    _escribir(tmp_path / "aaa.py", "def primera():\n    pass\n")
+    _escribir(tmp_path / "bbb.py", "def segunda():\n    pass\n")
+
+    corpus = code_chunks.extraer(tmp_path)
+
+    assert [f.firma for f in corpus.fragmentos] == ["def primera():", "def segunda():"]
+
+
+def test_al_truncar_deja_de_leer_archivos(tmp_path: Path) -> None:
+    """`break` -> `continue` en el corte externo: con continue se siguen
+    abriendo y parseando archivos que ya no pueden aportar nada, y el conteo
+    de "archivos indexados" que ve el usuario queda inflado."""
+    for nombre in ("a.py", "b.py", "c.py"):
+        _escribir(tmp_path / nombre, "def f():\n    pass\n\n\ndef g():\n    pass\n")
+
+    corpus = code_chunks.extraer(tmp_path, max_fragmentos=2)
+
+    assert corpus.truncado is True
+    # `a.py` llena el cupo; `b.py` se abre, se parsea y ahi se corta, asi que
+    # cuenta. `c.py` no se toca. Con `continue` en vez de `break` se
+    # abririan los tres y el numero que ve el usuario quedaria inflado.
+    assert corpus.archivos_leidos == 2
+
+
+def test_el_tope_corta_tambien_por_encima_del_cache_de_enteros(
+    tmp_path: Path,
+) -> None:
+    """`>=` -> `is` sobrevivia con topes chicos: CPython cachea los enteros
+    -5..256, asi que `is` funcionaba por accidente. Con un tope por encima del
+    cache compara identidad de objetos distintos, da siempre False, y el tope
+    no corta nunca -- justo en los repos grandes, que son su razon de ser."""
+    _escribir(
+        tmp_path / "mod.py", "".join(f"def f{i}():\n    pass\n" for i in range(300))
+    )
+
+    corpus = code_chunks.extraer(tmp_path, max_fragmentos=257)
+
+    assert len(corpus.fragmentos) == 257
+    assert corpus.truncado is True

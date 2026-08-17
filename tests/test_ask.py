@@ -4,6 +4,7 @@ Ninguno carga el modelo real: el encoder viene inyectado, mismo patron que
 `client=` en triage_agent.py y `encoder=` en embedding_index.py.
 """
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -135,3 +136,67 @@ def test_la_salida_json_lleva_ubicacion_y_similitud(tmp_path: Path) -> None:
     assert datos["fragmentos"][0]["line"] == 1
     assert datos["fragmentos"][0]["similitud"] == pytest.approx(1.0, abs=1e-6)
     assert "no te dice si algo es cierto" in datos["advertencia"]
+
+
+# ---------------------------------------------------------------------------
+# Huecos que encontro el mutation testing.
+# ---------------------------------------------------------------------------
+
+
+def test_la_respuesta_es_inmutable(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    encoder = _encoder_falso({"q": [1.0, 0.0], "def f():\n    pass": [1.0, 0.0]})
+
+    respuesta = ask.buscar(tmp_path, "q", top_n=1, encoder=encoder)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        respuesta.truncado = True  # type: ignore[misc]
+
+
+def test_por_defecto_devuelve_cinco_fragmentos(tmp_path: Path) -> None:
+    """`_TOP_N = 5` -> 4 / 6 sobrevivia: todos los tests pasaban `top_n`
+    explicito, asi que el default no se ejercitaba nunca. Literal 5 a
+    proposito, no ask._TOP_N: comparar contra la constante que el mutante
+    altera es tautologico."""
+    (tmp_path / "mod.py").write_text(
+        "".join(f"def f{i}():\n    pass\n\n\n" for i in range(8)), encoding="utf-8"
+    )
+    encoder = _encoder_falso(
+        {"q": [1.0, 0.0], **{f"def f{i}():\n    pass": [1.0, 0.0] for i in range(8)}}
+    )
+
+    respuesta = ask.buscar(tmp_path, "q", encoder=encoder)
+
+    assert len(respuesta.fragmentos) == 5
+
+
+def test_un_repo_con_codigo_pero_sin_definiciones_lo_dice_distinto(
+    tmp_path: Path,
+) -> None:
+    """`archivos_leidos == 0` -> `>= 0` sobrevivia. Son dos situaciones
+    distintas y el mensaje tiene que distinguirlas: "no hay codigo que
+    indexar" no es lo mismo que "hay codigo pero no hay ninguna funcion"."""
+    (tmp_path / "mod.py").write_text("CONSTANTE = 1\n", encoding="utf-8")
+
+    respuesta = ask.buscar(tmp_path, "q", top_n=5)
+    salida = ask.to_texto(respuesta)
+
+    assert respuesta.archivos_leidos == 1
+    assert respuesta.fragmentos == ()
+    assert "no se encontró código indexable" not in salida
+    assert "ningún fragmento" in salida
+
+
+def test_el_json_no_escapa_los_acentos(tmp_path: Path) -> None:
+    r"""`ensure_ascii=False` -> `True` sobrevivia. Todo este proyecto reporta
+    en español: con `True`, la advertencia y las preguntas salen como
+    `\u00f3` y el JSON deja de ser legible para un humano."""
+    (tmp_path / "mod.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    encoder = _encoder_falso(
+        {"¿dónde?": [1.0, 0.0], "def f():\n    pass": [1.0, 0.0]}
+    )
+
+    crudo = ask.to_json(ask.buscar(tmp_path, "¿dónde?", top_n=1, encoder=encoder))
+
+    assert "¿dónde?" in crudo
+    assert "\\u" not in crudo
