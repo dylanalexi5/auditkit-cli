@@ -200,3 +200,22 @@ def test_el_json_no_escapa_los_acentos(tmp_path: Path) -> None:
 
     assert "¿dónde?" in crudo
     assert "\\u" not in crudo
+
+
+def test_la_similitud_del_json_se_redondea_a_seis_decimales(tmp_path: Path) -> None:
+    """`round(similitud, 6)` -> 5 / 7 sobrevivian: los demas tests comparan
+    con `pytest.approx`, que por definicion no ve la precision.
+
+    El vector [1, 2] normalizado da 1/sqrt(5) = 0.4472135954..., que tiene
+    decimales de sobra para distinguir los tres redondeos. No es fragil: sale
+    de un encoder fijo, no del modelo real.
+    """
+    (tmp_path / "mod.py").write_text("def f():\n    pass\n", encoding="utf-8")
+
+    def _crudo(textos):
+        mapa = {"q": [1.0, 0.0], "def f():\n    pass": [1.0, 2.0]}
+        return np.vstack([np.array(mapa[t], dtype="float32") for t in textos])
+
+    datos = json.loads(ask.to_json(ask.buscar(tmp_path, "q", top_n=1, encoder=_crudo)))
+
+    assert datos["fragmentos"][0]["similitud"] == 0.447214
