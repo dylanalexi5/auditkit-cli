@@ -30,7 +30,8 @@ para `semantic_check.py`:
 
 ## Fases 1 y 2 — RAG: **rediseñadas antes de implementar**
 
-> **Estado: no implementadas.** Este bloque reemplaza el diseño original
+> **Estado: Paso 1 implementado, Paso 2 sin construir (y condicional).**
+> Este bloque reemplaza el diseño original
 > tras medir el costo real y encontrarle un problema de principio. Lo que
 > decía antes queda registrado en "Qué se descartó y por qué", más abajo —
 > no se borra, porque las razones del descarte son la parte útil.
@@ -112,10 +113,271 @@ notas de evidencia ya producidas, y se cruzan por similitud coseno. Son
   keywords se perdía? ¿introduce observaciones falsas? Se mide con la misma
   tabla de balance que se usó para el triage.
 
-### Paso 2 — RAG sobre el código (12-33s) — **condicional**
+#### Resultado — **CONSTRUIDO, MEDIDO Y RETIRADO**
 
-Solo si el Paso 1 demuestra que la infraestructura de embeddings se gana el
-lugar. Ahí sí `auditor/core/rag_index.py`: fragmentos por función/clase vía
+> **No está en `master`.** Se implementó completo (con tests y mutation
+> testing), se midió contra `click`, `black` y `requests`, y la medición lo
+> descartó — la tabla y el diagnóstico están más abajo. El PR se cerró sin
+> mergear: el cruce **no** queda detrás de un flag, porque un camino que mide
+> 18 falsos positivos y 0 verdaderos no mejora por estar apagado por defecto.
+>
+> Lo que sí sobrevive es `auditor/core/embedding_index.py`, la primitiva de
+> similitud: no era la parte equivocada. Entra a `master` en el PR del
+> comando `--ask`, donde recuperar y **ordenar** fragmentos de código es
+> exactamente lo que corresponde hacer con ella. La lección no es "los
+> embeddings no sirven acá" sino **"no se usa el score de recuperación como
+> si fuera el juicio"**.
+>
+> Lo que sigue en esta sección es el diseño tal como se construyó, porque
+> las razones por las que parecía razonable son la parte útil del registro.
+
+**Umbral calibrado, no elegido a ojo.** 11 pares reales (afirmaciones típicas
+de README contra las notas que producen los 4 verificadores), medidos con el
+modelo real:
+
+| umbral | encuentra que keywords pierde | falsos positivos |
+|---|---|---|
+| 0.25 | 1 | **1** |
+| **0.30** | **1** | **0** |
+| 0.35 | 0 | 0 |
+
+**Unión, no reemplazo — y eso lo decidió la medición.** Cada mecanismo
+encuentra un caso que el otro pierde: keywords agarra *"100% test coverage"*
+(comparte el token `test`), el semántico agarra *"No known security
+vulnerabilities"* (que keywords no ve por idioma). Quedarse solo con el
+semántico cambiaría un hallazgo por otro en vez de sumar, así que el
+semántico solo se consulta **cuando keywords no encontró nada**.
+
+**El bug del nombre de proyecto reaparece con embeddings, y ahí es peor.** El
+ADR 0002 documenta que "black" aparece en toda afirmación sobre sí mismo *y*
+en evidencia sin relación (`_black_version`), y cómo se arregló restándolo de
+ambos lados del cruce de keywords. Con embeddings no hay forma de "restar un
+token": el modelo junta los dos textos por el nombre compartido. Medido sobre
+el caso real de `psf/black`, **el falso positivo puntuaba más alto que el
+verdadero**:
+
+```
+con el nombre:  MIT <-> _black_version  0.341   |  coverage <-> sin tests  0.252
+sin el nombre:  MIT <-> _black_version  0.041   |  coverage <-> sin tests  0.342
+```
+
+Sacar el nombre del proyecto **antes de embeber** invierte el orden y deja a
+los dos del lado correcto del umbral. Lo detectó un test *existente* que
+empezó a fallar, no uno escrito para esto — vale registrarlo porque es
+justamente el tipo de regresión que un cambio "aditivo" puede introducir sin
+que nadie lo note.
+
+**Mutation testing:** 102 mutantes, 44 → 35 sobrevivientes (33 anotaciones
+`X | None` + 2 equivalentes verificados). Descontando equivalentes, 100% de
+los no equivalentes muertos.
+
+El gap más serio estaba **en los tests, no en el código**: el encoder falso
+pre-normalizaba sus vectores, así que la normalización del módulo era un
+no-op en cada test — justo donde vive la lógica no trivial. Con un encoder
+que devuelve normas arbitrarias (como el modelo real) aparecieron cuatro
+gaps reales, incluido que `keepdims=True` necesita *dos vectores de normas
+distintas **y** una nota que ejercite la segunda componente* para notarse:
+con una nota `[1, 0]` el error se cancela por casualidad.
+
+#### Tabla de balance sobre repos reales — **el Paso 1 no se gana el lugar**
+
+La calibración eran 11 casos construidos a mano, con el "esperado" de cada
+uno decidido por quien los escribió. Quedó anotado arriba como límite
+conocido. Medido contra repos reales, el límite resultó ser el resultado.
+
+A/B sobre el mismo repo y **las mismas afirmaciones** (se extraen una vez y
+se fijan para las dos corridas, para que la varianza del LLM no se cuele en
+la diferencia): una corrida con el cruce semántico activo, otra forzando
+`ModeloNoDisponibleError`, que cae a keywords puro por el mismo camino que
+en producción.
+
+```
+repo              afirm  keywords  +semantico  nuevos  perdidos
+---------------------------------------------------------------
+pallets/click         4         0           4       4         0
+psf/black             6         0           5       5         0
+psf/requests         18         2          11       9         0
+```
+
+`perdidos = 0` en los tres. Vale ser preciso sobre qué prueba eso: el cruce
+semántico solo se consulta cuando el de keywords no encontró nada, así que
+por construcción **no puede** pisar un hallazgo previo. Es un chequeo de
+regresión de la implementación contra su diseño, no evidencia de que el
+diseño sea bueno.
+
+**De los 18 hallazgos nuevos, los 18 son falsos.** Revisados uno por uno,
+ninguno es defendible:
+
+- `"Click is a Python package for creating beautiful command line interfaces"`
+  ← contradicho por `'sphinx_tabs' está declarado pero no se usa`
+- `"_Black_ is a PEP 8 compliant opinionated formatter."`
+  ← contradicho por `'hatch_vcs' está declarado pero no se usa`
+- `"- Streaming Downloads"`
+  ← contradicho por `'httpbin' está declarado pero no se usa`
+
+#### Errores que se componen: dos de los 18 citan evidencia que ya era falsa
+
+Un caso parecía el menos indefendible de los 18 — `"_Black_ can be installed
+by running pip install black"` contra `'multidict' se importa en el código
+pero no está declarado` — porque un import no declarado sí es, en abstracto,
+un problema de instalación. Verificado en el código, no se sostiene, y por
+una razón peor que la similitud:
+
+```python
+# black, src/blackd/__init__.py:9
+try:
+    from aiohttp import web
+    from multidict import MultiMapping
+    from .middlewares import cors
+except ImportError as ie:
+    raise ImportError(f"aiohttp dependency is not installed: {ie}. ...")
+```
+
+```python
+# requests, src/requests/help.py:24
+try:
+    from urllib3.contrib import pyopenssl
+except ImportError:
+    pyopenssl = None
+    OpenSSL = None
+else:
+    import cryptography
+    import OpenSSL
+```
+
+Los dos son imports **opcionales** dentro de `try/except ImportError` — el
+idioma canónico de Python para "esta dependencia puede no estar, y está
+bien". No son dependencias sin declarar. **La nota de `deps_check` ya era un
+falso positivo antes de que el cruce semántico la tocara.**
+
+O sea que el cruce semántico no solo inventó la relación: la inventó contra
+evidencia que tampoco era cierta. El caso que parecía discutible resulta ser
+el más claro de los 18, y el conteo honesto sigue siendo 18/18.
+
+**Bug de `deps_check` encontrado de paso — no arreglado acá.** `deps_check`
+ya ignora `if TYPE_CHECKING: import X` (se arregló en el PR #3), pero no el
+idioma hermano `try: import X / except ImportError:`. Reproducido mínimo:
+
+```python
+# repro/src/mod.py, con pyproject.toml sin dependencias
+if TYPE_CHECKING:
+    import solo_para_tipos      # correctamente ignorado
+try:
+    import dependencia_opcional # FLAGGED
+except ImportError:
+    dependencia_opcional = None
+```
+
+```
+veredicto: Verdict.NO_SOSTENIBLE
+  pyproject.toml:1 - 'dependencia_opcional' se importa en el codigo pero no
+  esta declarado en requirements.txt/pyproject.toml
+```
+
+El veredicto más duro que emite la herramienta, sobre un idioma de Python
+perfectamente legítimo. Es el mismo tipo de falso positivo que motivó el
+PR #3 y afecta a `black` y `requests` reales. Queda registrado acá como
+deuda con reproducción; el arreglo es una rama aparte, no se mezcla con la
+decisión sobre el cruce semántico.
+
+#### Por qué falla — no es el umbral, es la relación que se está midiendo
+
+Primero hay que saber qué significan los números con este modelo. Medido
+sobre un par de referencia:
+
+```
+paráfrasis ("the cat sat on the mat" / "a feline rested upon the rug")  0.556
+sin relación ("the cat sat on the mat" / "quarterly revenue exceeded")  -0.012
+```
+
+O sea: `_UMBRAL = 0.30` no es "algo relacionado", está a mitad de camino
+entre *sin relación alguna* y *paráfrasis*. Y los puntajes ganadores reales
+—mediana 0.406 en click, 0.392 en black, 0.343 en requests— nunca llegan
+cerca del nivel de paráfrasis. El "mejor match" nunca fue un match fuerte.
+
+Barrido de umbral, hallazgos totales sobre los tres repos:
+
+```
+0.30 -> 20    0.40 -> 12    0.50 -> 1
+0.35 -> 15    0.45 ->  3    0.60 -> 0
+```
+
+**No hay punto de operación que sirva.** Los que sobreviven a 0.45 siguen
+siendo falsos; al umbral donde desaparecen los falsos positivos (0.60) no
+queda ningún hallazgo. Subir el umbral no separa señal de ruido porque no
+hay señal que separar.
+
+Dos modos de falla distintos, medidos por separado:
+
+**1. Corpus de notas colapsado (click, black).** Las notas de evidencia son
+strings de plantilla que escribimos nosotros — `'X' está declarado pero no
+se usa en el código` — así que todas las notas de un verificador son casi el
+mismo texto, y lo único que varía es el nombre del paquete, justo el token
+sin peso semántico. Similitud media *entre notas del mismo corpus*: **0.501
+en click**, casi nivel de paráfrasis. El margen entre la nota ganadora y la
+segunda es de **0.003**: el `argmax` no está eligiendo, está desempatando al
+azar entre notas intercambiables. En promedio 2.8 de 13 notas quedan
+empatadas con el ganador dentro de 0.02.
+
+**2. Proximidad temática ≠ contradicción (requests).** Acá el corpus **no**
+está colapsado (similitud media entre notas 0.274, mediana 0.114) y aun así
+una sola nota, `'httpbin' está declarado pero no se usa`, gana el `argmax`
+de **10 de 16** afirmaciones. No por un defecto del corpus: `httpbin` es
+genuinamente la nota más cercana a un README que habla de HTTP en cada
+línea. El problema es la premisa del diseño. La similitud coseno encuentra
+la nota que habla del **mismo tema**, y el diseño la trata como si fuera la
+nota que **refuta la afirmación**. Son dos relaciones distintas y solo
+coinciden por casualidad.
+
+Esa casualidad es exactamente lo que hizo pasar la calibración: el par que
+funcionaba —`"No known security vulnerabilities"` ↔ `"pyyaml ...
+vulnerabilidades conocidas"`— es un caso donde el tema compartido y la
+contradicción coinciden. En repos reales no coinciden, y el mecanismo se
+queda con el tema.
+
+Es un error de diseño, no de calibración. Ningún umbral, y ningún modelo de
+embeddings más grande, arregla una función de ranking que mide la relación
+equivocada.
+
+#### Consecuencia
+
+**El Paso 2 queda descartado, no pospuesto** (ver abajo). Y el Paso 1 no se
+mergea: agrega 18 observaciones falsas y 0 verdaderas sobre tres repos
+reales, en una herramienta cuyo propósito declarado es no dejar pasar
+afirmaciones sin respaldo. Un verificador que inventa contradicciones es
+peor que no tenerlo.
+
+**Decidido: el PR se cierra sin mergear y el cruce no queda detrás de
+ningún flag.** Dejarlo apagado por defecto habría sido conservar en el repo
+un camino que ya sabemos que miente, apostando a que nadie lo encienda; y el
+costo de volver a escribirlo, si algún día una medición lo justificara, es
+menor que el de mantenerlo. `embedding_index.py` se conserva y se reusa en
+`--ask`.
+
+**La regla que queda escrita, y que vale más que este experimento:** la
+recuperación *localiza*, no *juzga*. Un mecanismo de similitud puede decir
+"esto habla del mismo tema"; no puede decir "esto es falso". Cada vez que se
+use recuperación en este proyecto, el veredicto tiene que salir de código
+determinista o no salir.
+
+### Paso 2 — RAG sobre el código (12-33s) — **DESCARTADO**
+
+Era condicional a que el Paso 1 demostrara que la infraestructura de
+embeddings se gana el lugar. La tabla de balance de arriba dice que no, y la
+causa medida —similitud coseno encuentra el mismo tema, no la
+contradicción— aplica igual o peor al Paso 2: buscar "el código más
+parecido a esta afirmación" sobre un corpus de funciones devuelve la función
+que habla del mismo tema, que es precisamente lo que uno esperaría encontrar
+si la afirmación **es cierta**. El Paso 2 heredaría el defecto con un corpus
+100x más grande y 25s más de costo por corrida.
+
+Se ahorran esos 25s por corrida en repos grandes. Ese también es un
+resultado válido, y es el que efectivamente ocurrió.
+
+El diseño original queda registrado abajo para que se entienda qué se
+descartó y contra qué se lo comparó — no como trabajo pendiente.
+
+Ahí iba `auditor/core/rag_index.py`: fragmentos por función/clase vía
 el `ast` que ya usa `readme_check.py`, vectores en un índice FAISS **en
 memoria** (nada persistente, nada que instalar como base de datos), y
 
