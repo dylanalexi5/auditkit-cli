@@ -289,8 +289,18 @@ def test_una_url_que_sigue_despues_del_nombre_no_es_un_atributo(
     """La regla del caracter POSTERIOR, que ningun test ejercitaba: en
     `demo.example.com/x` lo que descalifica la cita es la barra que sigue, no
     un separador previo (antes de `demo` hay una comilla). Sin ella
-    sobrevivian los ocho mutantes de esa comparacion."""
-    ctx = _repo_demo(tmp_path, "# demo\n\n```python\nURL = 'demo.example.com/api'\n```\n")
+    sobrevivian los ocho mutantes de esa comparacion.
+
+    Los dos dominios tienen largo distinto a proposito. Con uno solo
+    sobrevivia `limite += 1` -> `limite += 2`: el escaneo de a dos caia
+    igual sobre la barra por casualidad de paridad. Con la otra longitud la
+    saltea, sigue de largo y aparece el falso positivo. La propiedad real es
+    que el recorrido mire TODOS los caracteres, no uno de cada dos.
+    """
+    ctx = _repo_demo(
+        tmp_path,
+        "# demo\n\n```python\nA = 'demo.example.com/api'\nB = 'demo.example.co/api'\n```\n",
+    )
 
     result = readme_check.verify(ctx)
 
