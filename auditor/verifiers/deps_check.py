@@ -1,5 +1,4 @@
 import ast
-import itertools
 import json
 import re
 import subprocess
@@ -12,6 +11,7 @@ from auditor.core.models import Evidence, Verdict, VerifierResult, worst_verdict
 from auditor.core.repo_context import (
     RepoContext,
     declared_project_names,
+    is_test_fixture_path,
     normalize_dependency_name,
     read_pyproject_toml,
 )
@@ -195,25 +195,6 @@ def _run_pip_audit(entries: list[tuple[str, int, str]]) -> list[dict] | None:
         return None
 
 
-_TEST_FIXTURE_DIR_NAMES = frozenset({"tests", "test"})
-_TEST_FIXTURE_SUBDIR_NAMES = frozenset({"data", "fixtures"})
-
-
-def _is_test_fixture_path(relative_parts: tuple[str, ...]) -> bool:
-    """tests/data/ y tests/fixtures/ (a cualquier profundidad debajo) son la
-    convencion del ecosistema para guardar codigo de ejemplo usado COMO DATO
-    de un test, no codigo real del proyecto. psf/black tiene una carpeta
-    entera, tests/data/cases/, con archivos .py que son literalmente input
-    de prueba para el formateador - contienen `import foo`, `import hello`,
-    nombres inventados a proposito, y el ast scan los leia como si fueran
-    dependencias reales del propio black."""
-    lowered = [part.lower() for part in relative_parts]
-    return any(
-        a in _TEST_FIXTURE_DIR_NAMES and b in _TEST_FIXTURE_SUBDIR_NAMES
-        for a, b in itertools.pairwise(lowered)
-    )
-
-
 def _is_type_checking_guard(test: ast.expr) -> bool:
     """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` / `if t.TYPE_CHECKING:`
     (cualquier alias) - el body nunca corre en runtime, un type-checker lo lee
@@ -253,7 +234,7 @@ def _top_level_imports(path: Path) -> set[str]:
     names: set[str] = set()
     for py_file in path.rglob("*.py"):
         relative_parts = py_file.relative_to(path).parts
-        if _is_test_fixture_path(relative_parts):
+        if is_test_fixture_path(relative_parts):
             continue
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8", errors="ignore"))
