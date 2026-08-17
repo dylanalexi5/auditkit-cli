@@ -20,6 +20,7 @@ python -m auditor <url-del-repo> --run-tests     # incluye build_check (corre py
 python -m auditor <url-del-repo> --semantic      # incluye semantic_check (usa la API de Groq)
 python -m auditor <url-del-repo> --triage        # revisa hallazgos ambiguos con el agente de triage
 python -m auditor <url-del-repo> --json          # salida en JSON
+python -m auditor <url-del-repo> --ask "..."     # explora el código, sin veredicto (ver abajo)
 ```
 
 Por default corren `secrets`, `readme_check` y `deps_check` — no ejecutan
@@ -107,6 +108,61 @@ inferirlo leyendo texto crudo.
 
 Diseño completo, mitigaciones y resultados medidos en
 [docs/adr/0003-rag-agente-triage.md](docs/adr/0003-rag-agente-triage.md).
+
+## Explorar el código (`--ask`)
+
+> **`--ask` te muestra dónde mirar, no te dice si algo es cierto.**
+
+```
+pip install -e ".[rag]"
+python -m auditor https://github.com/psf/requests --ask "¿dónde maneja reintentos de conexión?"
+```
+
+```
+Pregunta: "¿dónde maneja reintentos de conexión?"
+(esto te muestra dónde mirar, no te dice si algo es cierto)
+
+37 archivos indexados. Más relacionados:
+
+  src/requests/adapters.py:158  (similitud 0.324)
+      class HTTPAdapter(BaseAdapter):
+  ...
+```
+
+Busca en el código los fragmentos —funciones, métodos, clases— más
+relacionados con una pregunta en lenguaje natural, y los lista con
+`archivo:línea`. Funciona en español y en inglés.
+
+**Qué NO hace, y es deliberado:**
+
+- **No emite veredicto.** No aparece en el reporte de auditoría, no tiene
+  `APROBADO`/`NO_SOSTENIBLE`, no participa del veredicto final.
+- **No corre los verificadores.** La pregunta es exploratoria; pagar
+  `pip-audit` y el scan de secretos para responderla sería gasto puro.
+- **No responde la pregunta.** Devuelve los lugares donde probablemente esté
+  la respuesta. Si los fragmentos no tienen que ver, eso también es
+  información: significa que el repo no habla de eso donde el modelo lo
+  esperaba, no que la funcionalidad no exista.
+- **No hay LLM en este camino.** Embeddings, producto punto y un `argsort`.
+  A nadie se le pregunta si algo es verdad.
+
+Ese recorte no es modestia: es el resultado de haber medido lo contrario. Un
+diseño anterior sí convertía "esto es lo más parecido" en "esto contradice lo
+que dice el README", y sobre `click`, `black` y `requests` produjo 18
+hallazgos nuevos de los cuales **los 18 eran falsos**
+([ADR 0003](docs/adr/0003-rag-agente-triage.md)). La similitud coseno
+encuentra el texto del mismo tema, no el que refuta.
+
+**Costo.** Es opt-in porque es caro: ~21s sobre `psf/requests` (4.7s de
+import, 4.4s de cargar el modelo, 12.3s de embeber 807 fragmentos). Sin
+`--ask` no se importa nada, y dentro de `--ask` el modelo no se carga si el
+repo no tiene un solo fragmento indexable.
+
+**La similitud va cruda, sin porcentaje.** Es una distancia coseno, no una
+probabilidad de que la respuesta sea correcta.
+
+Diseño, elección del modelo y mediciones en
+[docs/adr/0005-comando-ask.md](docs/adr/0005-comando-ask.md).
 
 ## Seguridad
 

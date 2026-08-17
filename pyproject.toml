@@ -13,9 +13,25 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+# `--ask` es opt-in y sentence-transformers arrastra torch (~2GB), asi que va
+# como extra y no como dependencia principal. El manejo de
+# ModeloNoDisponibleError ya existe y es el complemento correcto de un extra.
+#
+# Estaban importadas sin declarar, que es exactamente el bug que este proyecto
+# existe para encontrar: deps_check marcaba NO_SOSTENIBLE contra este repo -- el
+# auditor fallaba su propia auditoria. faiss-cpu NO se declara porque no se
+# importa en ningun archivo (ADR 0003 lo midio: 2ms de construccion contra un
+# matmul de numpy que a esta escala es sub-milisegundo).
+rag = [
+    "sentence-transformers>=3.0",
+    "numpy>=1.24",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "slow: carga el modelo de embeddings real (~7.6s la primera vez del proceso)",
+]
 
 [tool.ruff]
 line-length = 100
