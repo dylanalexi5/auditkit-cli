@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -113,3 +114,103 @@ def test_main_triage_failure_does_not_kill_the_report(
 
     assert exit_code == 0
     assert "secrets" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# --ask (ADR 0005): exploratorio, separado del reporte, sin veredicto.
+# ---------------------------------------------------------------------------
+
+
+def _fake_clone_con_codigo(_url: str, dest: Path) -> None:
+    dest.mkdir(parents=True)
+    (dest / "README.md").write_text("# demo\n")
+    (dest / "mod.py").write_text("def reintentar(req):\n    pass\n", encoding="utf-8")
+
+
+def _encoder_constante(_textos):
+    import numpy as np
+
+    return np.vstack([np.array([1.0, 0.0], dtype="float32") for _ in _textos])
+
+
+def test_ask_no_corre_los_verificadores(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """La pregunta es exploratoria: pagar pip-audit y el scan de secretos
+    para responderla seria gasto puro. Si algun verificador corriera, este
+    test explota."""
+    monkeypatch.setattr(cli, "_clone", _fake_clone_con_codigo)
+    monkeypatch.setattr(cli, "_encoder_de_ask", lambda: _encoder_constante)
+    for modulo in (cli.secrets, cli.readme_check, cli.deps_check):
+        monkeypatch.setattr(
+            modulo,
+            "verify",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("--ask no debe correr verificadores")
+            ),
+        )
+
+    exit_code = cli.main(["https://github.com/octocat/Hello-World", "--ask", "reintentos"])
+
+    assert exit_code == 0
+
+
+def test_ask_imprime_ubicacion_y_la_advertencia(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli, "_clone", _fake_clone_con_codigo)
+    monkeypatch.setattr(cli, "_encoder_de_ask", lambda: _encoder_constante)
+
+    exit_code = cli.main(["https://github.com/octocat/Hello-World", "--ask", "reintentos"])
+
+    salida = capsys.readouterr().out
+    assert exit_code == 0
+    assert "mod.py:1" in salida
+    assert "no te dice si algo es cierto" in salida
+
+
+def test_ask_no_emite_veredicto_ni_secciones_del_reporte(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """No aparece en el reporte de auditoria: ni veredicto final, ni las
+    secciones de los verificadores."""
+    monkeypatch.setattr(cli, "_clone", _fake_clone_con_codigo)
+    monkeypatch.setattr(cli, "_encoder_de_ask", lambda: _encoder_constante)
+
+    cli.main(["https://github.com/octocat/Hello-World", "--ask", "reintentos"])
+
+    salida = capsys.readouterr().out
+    assert "Veredicto final" not in salida
+    assert "APROBADO" not in salida
+    assert "deps_check" not in salida
+
+
+def test_ask_con_el_modelo_no_disponible_falla_explicito(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Sin modelo no hay respuesta. Fingir una lista vacia seria peor que
+    fallar: se leeria como "no hay nada que ver aca"."""
+    monkeypatch.setattr(cli, "_clone", _fake_clone_con_codigo)
+
+    def _sin_modelo():
+        raise cli.ModeloNoDisponibleError("no se pudo cargar el modelo")
+
+    monkeypatch.setattr(cli, "_encoder_de_ask", _sin_modelo)
+
+    exit_code = cli.main(["https://github.com/octocat/Hello-World", "--ask", "x"])
+
+    assert exit_code == 1
+    assert "no se pudo cargar el modelo" in capsys.readouterr().err
+
+
+def test_ask_con_json_devuelve_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli, "_clone", _fake_clone_con_codigo)
+    monkeypatch.setattr(cli, "_encoder_de_ask", lambda: _encoder_constante)
+
+    cli.main(["https://github.com/octocat/Hello-World", "--ask", "x", "--json"])
+
+    datos = json.loads(capsys.readouterr().out)
+    assert datos["pregunta"] == "x"
+    assert datos["fragmentos"][0]["file"] == "mod.py"

@@ -5,7 +5,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from auditor.core import triage_agent
+from auditor import ask
+from auditor.core import embedding_index, triage_agent
+from auditor.core.embedding_index import ModeloNoDisponibleError
 from auditor.core.models import AuditReport, worst_verdict
 from auditor.core.orchestrator import add_result
 from auditor.core.orchestrator import run as run_orchestrator
@@ -77,6 +79,33 @@ def _apply_triage(report: AuditReport, repo_path: Path) -> AuditReport:
     )
 
 
+def _encoder_de_ask():
+    """Aislada para poder sustituirla en los tests sin tocar red ni disco.
+
+    Se resuelve el encoder ACA y no adentro de `ask.buscar` para que el fallo
+    de carga del modelo se reporte antes de trocear el repo entero: sin
+    modelo no hay respuesta posible, y hacer el trabajo para después no poder
+    usarlo es gasto puro.
+    """
+    return embedding_index._encoder()
+
+
+def _responder_pregunta(repo_path: Path, pregunta: str, como_json: bool) -> int:
+    """`--ask` corta el flujo de auditoría: no corre verificadores, no arma
+    reporte y no emite veredicto (ADR 0005). La pregunta es exploratoria."""
+    try:
+        encoder = _encoder_de_ask()
+    except ModeloNoDisponibleError as exc:
+        # Degradar en silencio a una lista vacía sería peor que fallar: se
+        # leería como "no hay nada que ver acá".
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    respuesta = ask.buscar(repo_path, pregunta, encoder=encoder)
+    print(ask.to_json(respuesta) if como_json else ask.to_texto(respuesta))
+    return 0
+
+
 def _use_utf8_streams() -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -109,6 +138,16 @@ def main(argv: list[str] | None = None) -> int:
             "(usa la API de Groq, requiere GROQ_API_KEY)"
         ),
     )
+    parser.add_argument(
+        "--ask",
+        metavar="PREGUNTA",
+        help=(
+            "busca en el código los fragmentos más relacionados con una pregunta "
+            "y los lista con archivo:línea. Exploratorio: no emite veredicto ni "
+            "corre los verificadores — te muestra dónde mirar, no te dice si algo "
+            "es cierto"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -116,6 +155,16 @@ def main(argv: list[str] | None = None) -> int:
     except InvalidUrlError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    if args.ask:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir) / "repo"
+            try:
+                _clone(args.url, repo_path)
+            except subprocess.CalledProcessError as exc:
+                print(f"No se pudo clonar {args.url}: {exc.stderr.strip()}", file=sys.stderr)
+                return 1
+            return _responder_pregunta(repo_path, args.ask, args.json)
 
     verifiers = dict(_PASSIVE_VERIFIERS)
     skipped: list[str] = []
