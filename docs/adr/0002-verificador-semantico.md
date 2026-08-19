@@ -151,12 +151,32 @@ de escribir el verificador (no se asume, se probó).
   necesita red para PyPI/OSV). Con `--semantic` sin `GROQ_API_KEY`, el
   verificador se salta con observación explícita, nunca falla en silencio
   ni bloquea el resto del pipeline.
-- **El catálogo de modelos de Groq cambia con el tiempo.** `llama-3.3-70b-versatile`
-  es el modelo vigente al escribir esto (confirmado contra
-  `client.models.list()` real). Si Groq lo deprecara, el síntoma sería un
-  `groq.APIError` capturado y reportado como observación — no un crash —
-  pero el nombre del modelo queda hardcodeado acá como deuda conocida, no
-  se resuelve con un mecanismo de fallback en este MVP.
+- **El catálogo de modelos de Groq cambia con el tiempo — y cambió.** Esta
+  deuda se anotó como hipotética ("si Groq lo deprecara...") y se volvió
+  real: `llama-3.3-70b-versatile` desapareció por completo del catálogo
+  (`client.models.list()` ya no lo lista; toda la familia Llama se fue de
+  esta cuenta). El síntoma fue exactamente el anticipado — `groq.APIError`
+  (un `NotFoundError`, subclase de `APIError`) capturado y reportado como
+  observación, nunca un crash — pero eso significa que `--semantic` y
+  `--triage` degradaban en silencio a "la API no respondió" en cada
+  corrida real, sin que nada lo hiciera evidente salvo correr contra la API
+  de verdad.
+
+  Reemplazado por `qwen/qwen3.6-27b`, elegido midiendo y no a ojo: sobre
+  los 5 escenarios reales de `triage_agent` (ver ADR 0003), da 5/5 en dos
+  corridas — mejor que el mejor resultado medido con el modelo anterior
+  (3/4, con un caso que quedó `xfail` permanente). Se probó primero
+  `openai/gpt-oss-120b`: funciona bien para JSON mode (este módulo) pero
+  falla 3 de 5 casos de triage porque intenta responder el segundo turno
+  con una llamada a una herramienta inventada (`"JSON"`) en vez de texto
+  plano, y Groq rechaza esa llamada con 400 antes de que el código la vea.
+  `qwen/qwen3.6-27b` no tiene ese problema y sirve para los dos usos, así
+  que se usa uno solo — mismo diseño original.
+
+  Sigue sin haber mecanismo de fallback automático: el nombre del modelo
+  sigue hardcodeado, y la próxima deprecación se va a notar de la misma
+  forma — degradación silenciosa, detectable solo corriendo los tests
+  reales. Deuda conocida, no resuelta, ahora con un caso real documentado.
 
 ## Verificación
 

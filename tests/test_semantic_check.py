@@ -103,7 +103,7 @@ def test_extract_claims_calls_api_with_expected_params() -> None:
     # Valores literales a proposito, no semantic_check._MODEL/_TIMEOUT_SECONDS:
     # comparar contra el mismo atributo que se esta probando es tautologico -
     # si alguien cambia la constante, el assert se mueve con ella y nunca falla.
-    assert kwargs["model"] == "llama-3.3-70b-versatile"
+    assert kwargs["model"] == "qwen/qwen3.6-27b"
     assert kwargs["temperature"] == 0
     assert kwargs["timeout"] == 30
     assert kwargs["response_format"] == {"type": "json_object"}
