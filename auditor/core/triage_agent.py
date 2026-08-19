@@ -34,7 +34,7 @@ import groq
 from auditor.core.models import Evidence, Verdict, VerifierResult
 from auditor.core.semantic_client import MissingApiKeyError, get_client
 
-_MODEL = "llama-3.3-70b-versatile"
+_MODEL = "qwen/qwen3.6-27b"
 _TIMEOUT_SECONDS = 20
 
 MAX_ITERACIONES = 3

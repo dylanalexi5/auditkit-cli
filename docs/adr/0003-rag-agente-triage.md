@@ -439,8 +439,14 @@ el modelo no puede ni expresar un archivo distinto — y no pierde nada de
 agencia: sigue decidiendo si llamar, con qué radio, y si volver a llamar
 con un radio mayor tras ver el resultado.
 
-**Validado contra la API real** (Groq, `llama-3.3-70b-versatile`), tres
-casos, no solo mocks:
+> **Nota posterior:** `llama-3.3-70b-versatile` fue deprecado por Groq y
+> reemplazado por `qwen/qwen3.6-27b` (ver ADR 0002, sección de deuda
+> conocida). Los números de abajo son la medición histórica con el modelo
+> original — la re-medición completa con el modelo nuevo, sobre los 5
+> casos (no 3), está en la sección "Fase 4" más abajo.
+
+**Validado contra la API real** (Groq, `llama-3.3-70b-versatile`, medición
+histórica), tres casos, no solo mocks:
 
 | Caso | Esperado | Resultado |
 |---|---|---|
@@ -975,6 +981,33 @@ La sonda usa el system prompt real a propósito: una primera versión con
 `max_tokens=3` reportó "cuota disponible" y los tests fallaron igual — una
 llamada de 10 tokens entra donde una de 618 no. El tamaño de la sonda tiene
 que ser representativo del payload real.
+
+### Cierre real: no era la cuota, era el modelo (deprecado)
+
+Cuando la cuota volvió, los 5 `test_real_api_*` seguían fallando — pero
+esta vez con `groq.NotFoundError: model `llama-3.3-70b-versatile` does
+not exist`. `client.models.list()` confirmó que toda la familia Llama
+había desaparecido del catálogo de esta cuenta. Exactamente la deuda que
+ADR 0002 había anotado como hipotética ("si Groq lo deprecara..."), ahora
+real.
+
+Antes de elegir un reemplazo se midió, no se adivinó. Candidatos probados
+contra los 5 escenarios reales (los 4 estrictos + el que queda `xfail`):
+
+| Modelo | JSON mode (semantic_check) | Triage (5 casos) |
+|---|---|---|
+| `openai/gpt-oss-120b` | OK | **2/5** — falla el segundo turno: en vez de responder en texto plano intenta llamar a una herramienta inventada (`"JSON"`) que no está declarada, Groq rechaza la llamada con 400 antes de que el código la vea |
+| `qwen/qwen3.6-27b` | OK | **5/5**, dos corridas |
+
+`qwen/qwen3.6-27b` sirve para los dos usos, así que se usa uno solo —
+mismo diseño original. El 5/5 incluye el caso que con el modelo anterior
+quedó `xfail` permanente (3/4 medido, ver el `xfail(strict=False)` en
+`test_real_api_baja_el_blob_de_notebook_en_un_test_de_black`). El marcador
+**se deja** — dos corridas limpias no son evidencia suficiente para retirar
+una salvaguarda que existe justamente porque el modelo no es determinista;
+si sigue pasando de forma consistente con el tiempo, retirarlo es una
+decisión aparte, con más corridas de por medio, no un efecto colateral de
+este cambio.
 
 ## Verificación
 

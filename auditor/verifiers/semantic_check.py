@@ -8,7 +8,7 @@ from auditor.core.models import Evidence, Verdict, VerifierResult
 from auditor.core.repo_context import RepoContext, declared_project_names
 from auditor.core.semantic_client import MissingApiKeyError, get_client
 
-_MODEL = "llama-3.3-70b-versatile"
+_MODEL = "qwen/qwen3.6-27b"
 _TIMEOUT_SECONDS = 30
 _README_NAMES = ("README.md", "README.rst", "README.txt", "README")
 _KEYWORD = re.compile(r"[a-záéíóúñ0-9]{4,}")
