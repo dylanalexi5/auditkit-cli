@@ -38,7 +38,16 @@ reporte, nunca en silencio.
 
 - **secrets** — busca secretos reales en el código (`detect-secrets`).
 - **readme_check** — contrasta afirmaciones del README contra el código
-  real (ej. "100% test coverage" sin tests de verdad).
+  real, en dos formas independientes:
+  - **Cobertura de tests**: "100% test coverage" contra la existencia real
+    de funciones `test_*` en el repo.
+  - **Identificadores del ejemplo de uso**: si el README muestra
+    `from paquete import X` o `paquete.X` en un bloque de código Python, se
+    verifica con `ast` que `X` exista de verdad en el paquete — no un
+    método de otra clase, no un nombre de test homónimo. Solo se revisan
+    identificadores que el propio README atribuye al proyecto (no
+    `os.path.join`, no ejemplos de otras librerías). Detalle y limitaciones
+    medidas en [docs/adr/0004-tabla-de-simbolos.md](docs/adr/0004-tabla-de-simbolos.md).
 - **build_check** — corre el comando de test real y captura el resultado.
   Solo con `--run-tests`.
 - **deps_check** — vulnerabilidades reales (`pip-audit`) y dependencias
