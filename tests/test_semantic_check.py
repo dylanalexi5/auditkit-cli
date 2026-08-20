@@ -518,6 +518,11 @@ def test_verify_declara_que_el_readme_quedo_recortado(
     assert len(resultado.evidence) == 1
     assert "24000" in resultado.evidence[0].note
     assert "30000" in resultado.evidence[0].note
+    # `line=0` es "sin ubicacion", la misma convencion que `_skipped`. Fijarlo
+    # no es decorado: apuntar a README.md:1 seria fabricar una ubicacion, el
+    # bug que este modulo ya arreglo una vez en `_locate_quote`.
+    assert resultado.evidence[0].file == "README.md"
+    assert resultado.evidence[0].line == 0
 
 
 def test_verify_no_declara_recorte_si_el_readme_entra_entero(

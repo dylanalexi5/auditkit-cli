@@ -57,6 +57,13 @@ reporte, nunca en silencio.
   las cruza contra la evidencia que ya produjeron los otros cuatro. El
   modelo **solo extrae**, nunca juzga si la afirmación es cierta: eso lo
   decide código determinístico. Solo con `--semantic`.
+  **Límite medido:** el techo de tokens por minuto de la API no deja mandar
+  un README grande entero, así que se analizan los primeros 24.000
+  caracteres. Cuando el README es más largo, el reporte lo dice —
+  *"solo se analizaron los primeros 24000 de N caracteres"*— y el veredicto
+  no puede ser `APROBADO`: "no encontré nada" y "no lo miré entero" no son
+  la misma afirmación. Números en
+  [docs/adr/0002-verificador-semantico.md](docs/adr/0002-verificador-semantico.md).
 
 Cada uno devuelve APROBADO / APROBADO_CON_OBSERVACIONES / NO_SOSTENIBLE con
 evidencia archivo:línea:
