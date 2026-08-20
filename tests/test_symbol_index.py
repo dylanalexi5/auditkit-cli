@@ -336,3 +336,19 @@ def test_el_paquete_raiz_no_se_registra_dentro_de_si_mismo(tmp_path: Path) -> No
     indice = symbol_index.construir(tmp_path)
 
     assert indice.resuelve("demo", "demo") == []
+
+
+def test_un_subpaquete_que_ordena_antes_que_el_paquete_se_registra(
+    tmp_path: Path,
+) -> None:
+    """`!=` -> `>` sobrevivia: comparar los nombres con `>` en vez de `!=`
+    descarta todo subpaquete cuyo nombre ordene antes que el del paquete
+    raiz, que es la mitad de los casos."""
+    sub = tmp_path / "demo" / "api"
+    sub.mkdir(parents=True)
+    (tmp_path / "demo" / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "__init__.py").write_text("", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("demo", "api") == [("demo/api/__init__.py", 1)]
