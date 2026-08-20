@@ -28,6 +28,33 @@ def test_verify_ignores_fake_imports_in_test_fixture_files(tmp_path: Path) -> No
     assert result.evidence == []
 
 
+def test_verify_ignores_imports_in_examples_dir(tmp_path: Path) -> None:
+    """Reproduce pallets/click: examples/ trae CLIs de muestra que no son el
+    proyecto. examples/imagepipe/imagepipe.py hace `from PIL import Image`
+    -- import real, pero de un script de demo, no una dependencia de click.
+    Y examples/complex/complex/cli.py es un paquete de ejemplo LLAMADO
+    literalmente `complex`, que ademas colisiona con el nombre del builtin:
+    el reporte real decia "'complex' se importa... no esta declarado", que
+    a primera vista parece un bug de deteccion de builtins pero no lo es --
+    `complex` ahi es un import de verdad, de un paquete de verdad, que
+    simplemente no es codigo del proyecto."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = []\n'
+    )
+    examples_dir = tmp_path / "examples" / "complex" / "complex"
+    examples_dir.mkdir(parents=True)
+    (examples_dir / "cli.py").write_text("from complex.cli import pass_environment\n")
+    imagepipe_dir = tmp_path / "examples" / "imagepipe"
+    imagepipe_dir.mkdir(parents=True)
+    (imagepipe_dir / "imagepipe.py").write_text("from PIL import Image\n")
+
+    with patch("auditor.verifiers.deps_check._run_pip_audit", return_value=[]):
+        result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
 def test_verify_ignores_imports_inside_type_checking_guard(tmp_path: Path) -> None:
     """Reproduce pallets/click: `if t.TYPE_CHECKING: import typing_extensions`
     en src/click/core.py - nunca corre en runtime, no es una dependencia."""

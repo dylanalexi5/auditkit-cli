@@ -12,6 +12,7 @@ from auditor.core.repo_context import (
     KNOWN_IMPORT_TO_PACKAGE,
     RepoContext,
     declared_project_names,
+    is_sample_code_path,
     is_test_fixture_path,
     normalize_dependency_name,
     read_pyproject_toml,
@@ -224,7 +225,7 @@ def _top_level_imports(path: Path) -> set[str]:
     names: set[str] = set()
     for py_file in path.rglob("*.py"):
         relative_parts = py_file.relative_to(path).parts
-        if is_test_fixture_path(relative_parts):
+        if is_test_fixture_path(relative_parts) or is_sample_code_path(relative_parts):
             continue
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8", errors="ignore"))
