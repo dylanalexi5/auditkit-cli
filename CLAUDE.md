@@ -35,6 +35,12 @@ dependencias reales — no contra lo que el README afirma.
   puede verificar, no inventada. Y las dos últimas las encontró el mutation
   testing, no la revisión del test.
 
+  Hay una **cuarta aparición conocida y todavía sin decidir**, anotada abajo
+  en "Mejoras futuras": `secrets.py` en notebooks. Es de menor severidad que
+  las tres de la tabla y la diferencia importa para no confundirlas — en las
+  tres, la ubicación apuntaba a un lugar **equivocado**; en la de notebooks
+  apunta al lugar correcto con la **etiqueta equivocada**.
+
 ## Mejoras futuras (anotadas, no implementadas)
 - **Helper de test compartido para la ubicación de la evidencia.** Que exista
   algo como `assert_ubicacion_real(evidencia, archivo_esperado)` en
@@ -43,6 +49,19 @@ dependencias reales — no contra lo que el README afirma.
   se cumple a mano y por eso ya se rompió tres veces. No se implementa
   todavía porque el quinto verificador todavía no existe; cuando aparezca,
   esto va antes que él.
+- **`secrets.py` usa el índice de celda como `line` en notebooks.**
+  `auditor/verifiers/secrets.py:93` construye
+  `Evidence(file=relative, line=cell_index, ...)`: el reporte dice
+  `notebook.ipynb:3` y todo consumidor lo lee como *línea 3*, cuando en
+  realidad es *celda 3*. La línea real dentro de la celda
+  (`secret.line_number`) se descarta.
+
+  **Pendiente de decisión de diseño, no bug listo para arreglar.** No hay una
+  opción obviamente correcta: si `line` pasa a ser la línea dentro de la
+  celda, apunta a un número que no significa nada en el `.ipynb`, que es un
+  JSON. Inclinación registrada para cuando se retome: que la **nota** diga
+  `celda N` explícito, en vez de que `line` mienta distinto. Se resuelve
+  cuando le toque.
 - **`build_check` mete la salida entera de pytest en la nota**
   (`output[-2000:]`), y `semantic_check` la incrusta adentro de las suyas. El
   reporte queda ilegible. Queda para el Bloque C (interfaz), donde se decide
