@@ -225,3 +225,53 @@ def test_sin_lineas_de_resumen_la_evidencia_no_finge_un_archivo(
     assert len(result.evidence) == 1
     assert result.evidence[0].file == "pytest"
     assert result.evidence[0].line == 0
+
+
+def test_el_mismo_error_en_varios_tests_colapsa_en_una_sola_evidencia(
+    tmp_path: Path,
+) -> None:
+    """Reproduce psf/requests --run-tests: un fixture compartido roto (ahi,
+    httpbin) revienta en cada test que lo usa, y el mismo mensaje de pytest
+    salia una vez por test -- mas de 50 evidencias identicas para un unico
+    error real. Con un fixture roto usado por 3 tests en 2 archivos, tiene
+    que quedar UNA evidencia, no tres."""
+    _write_pyproject(tmp_path)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef roto():\n"
+        '    raise RuntimeError("fixture rota")\n',
+        encoding="utf-8",
+    )
+    (tests_dir / "test_a.py").write_text(
+        "def test_uno(roto):\n    pass\n\n\ndef test_dos(roto):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_b.py").write_text(
+        "def test_tres(roto):\n    pass\n", encoding="utf-8"
+    )
+
+    result = build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    assert len(result.evidence) == 1
+    nota = result.evidence[0].note
+    assert "repetido en 3 tests" in nota
+    assert "tests/test_a.py" in nota
+    assert "tests/test_b.py" in nota
+
+
+def test_errores_con_causa_distinta_no_se_mezclan(tmp_path: Path) -> None:
+    """El colapso es por mensaje de error, no por "hubo mas de un fallo": dos
+    causas distintas siguen siendo dos evidencias."""
+    _write_pyproject(tmp_path)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_dos.py").write_text(
+        "def test_uno():\n    assert 1 == 2\n\n\ndef test_dos():\n    assert 3 == 4\n",
+        encoding="utf-8",
+    )
+
+    result = build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert len(result.evidence) == 2
