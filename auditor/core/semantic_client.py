@@ -1,8 +1,8 @@
-"""Conexión con la API de Groq para el verificador semántico.
+"""Conexión con la API de Groq.
 
-Todavía no hay verificador semántico: esto es solo el cliente, listo para que
-funcione apenas haya una GROQ_API_KEY real en `.env`. La clave se busca primero
-en el entorno y después en el archivo `.env` de la raíz del repo.
+La usan `semantic_check` (`--semantic`) y el agente de triage (`--triage`).
+La clave se busca primero en el entorno y después en el archivo `.env` de la
+raíz del repo.
 """
 
 import os
@@ -12,7 +12,7 @@ from groq import Groq
 
 _ENV_VAR = "GROQ_API_KEY"
 _MISSING_KEY_MESSAGE = (
-    "Falta GROQ_API_KEY en .env — el verificador semántico no puede correr sin ella"
+    "Falta GROQ_API_KEY en .env — --semantic y --triage no pueden correr sin ella"
 )
 _DEFAULT_DOTENV = Path(__file__).resolve().parents[2] / ".env"
 
