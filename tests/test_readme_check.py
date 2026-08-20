@@ -466,3 +466,19 @@ def test_en_rst_el_backtick_doble_sigue_siendo_codigo(tmp_path: Path) -> None:
 
     assert [e.line for e in result.evidence] == [4]
     assert "fantasma" in result.evidence[0].note
+
+
+def test_en_un_readme_txt_el_backtick_simple_sigue_siendo_codigo(tmp_path: Path) -> None:
+    """`== ".rst"` -> `>= ".rst"` sobrevivia: comparar sufijos con `>=` mete
+    en la regla de RST a todo lo que ordene despues, `.txt` incluido, y ahi
+    el backtick simple SI delimita codigo."""
+    ctx = _repo_demo(
+        tmp_path,
+        "demo\n\nUsa `demo.fantasma()` para empezar.\n",
+        nombre_readme="README.txt",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert [e.line for e in result.evidence] == [3]
+    assert "fantasma" in result.evidence[0].note

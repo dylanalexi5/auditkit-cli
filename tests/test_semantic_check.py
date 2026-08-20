@@ -671,3 +671,45 @@ def test_no_cruza_contra_una_nota_de_algo_que_no_se_verifico(
 
     assert result.verdict == Verdict.APROBADO
     assert result.evidence == []
+
+
+def test_una_nota_benigna_no_tapa_a_las_que_vienen_despues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`continue` -> `break` sobrevivia. Con `break`, la primera nota benigna
+    cortaba el recorrido entero y toda la evidencia posterior quedaba sin
+    mirar: un aviso de "esto esta bien" tapando hallazgos reales."""
+    (tmp_path / "README.md").write_text(
+        "# demo\n\nThis project has complete test coverage.\n", encoding="utf-8"
+    )
+    content = _claims_payload(
+        ("complete test coverage", "This project has complete test coverage.")
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(
+                    file="pyproject.toml",
+                    line=1,
+                    note=(
+                        "'dateutil' se importa pero fue declarado como "
+                        "'python-dateutil' - mapeo conocido, no es un fallo real"
+                    ),
+                ),
+                Evidence(
+                    file="README.md",
+                    line=3,
+                    note='README afirma "coverage" pero no hay funciones de test en el repo',
+                ),
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert len(result.evidence) == 1
+    assert "no hay funciones de test" in result.evidence[0].note
