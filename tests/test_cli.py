@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -214,3 +217,44 @@ def test_ask_con_json_devuelve_json(
     datos = json.loads(capsys.readouterr().out)
     assert datos["pregunta"] == "x"
     assert datos["fragmentos"][0]["file"] == "mod.py"
+
+
+@pytest.mark.slow
+def test_ask_contra_un_repo_real_no_ensucia_la_salida() -> None:
+    """El unico test que corre `--ask` de punta a punta contra un repo real.
+
+    Antes, la primera linea que veia el usuario no era la pregunta sino el
+    ruido de HuggingFace por stderr (warning de peticion sin token y barra
+    de carga de pesos). stdout siempre estuvo limpio; el que ensuciaba era
+    stderr, y en una terminal se ve igual.
+    """
+    entorno = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("HF_HUB_DISABLE_PROGRESS_BARS", "HF_HUB_VERBOSITY")
+    }
+    entorno["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    entorno["PYTHONIOENCODING"] = "utf-8"
+
+    resultado = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "auditor",
+            "https://github.com/psf/requests",
+            "--ask",
+            "donde maneja los reintentos de conexion?",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=entorno,
+        timeout=600,
+        check=False,
+    )
+
+    assert resultado.returncode == 0, resultado.stderr
+    assert resultado.stderr == ""
+    assert "Pregunta:" in resultado.stdout
+    assert "similitud" in resultado.stdout

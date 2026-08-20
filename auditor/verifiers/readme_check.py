@@ -39,6 +39,15 @@ _FENCE_PYTHON = re.compile(
     r"```(?:python|py|python3|pycon)\b(.*?)```", re.DOTALL | re.IGNORECASE
 )
 _INLINE = re.compile(r"``([^`]+)``|`([^`\n]+)`")
+# En RST el backtick SIMPLE no delimita código: es una referencia, y el uso
+# de lejos más común es un link — `texto <url>`_. El literal se escribe con
+# backtick doble. Aplicarle la regla de markdown metía el texto visible de
+# cada link adentro de un "ejemplo de uso". Medido en `arrow-py/arrow`,
+# README.rst:116: `arrow.readthedocs.io <https://arrow.readthedocs.io>`_
+# salía reportado como "'readthedocs' no está definido en el paquete
+# 'arrow'". El backtick doble se sigue revisando, así que el chequeo no se
+# apaga en los repos .rst — solo deja de leer prosa enlazada como código.
+_INLINE_RST = re.compile(r"``([^`]+)``")
 _IMPORT_FROM = re.compile(r"\bfrom\s+([\w.]+)\s+import\s+([^\n#]+)")
 _ATRIBUTO = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
 _NOMBRE = re.compile(r"[A-Za-z_]\w*")
@@ -89,10 +98,14 @@ def _sin_fences(readme_text: str) -> str:
     return _FENCE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), readme_text)
 
 
-def _fragmentos_de_codigo(readme_text: str):
+def _inline_de(readme_path: Path) -> re.Pattern[str]:
+    return _INLINE_RST if readme_path.suffix.lower() == ".rst" else _INLINE
+
+
+def _fragmentos_de_codigo(readme_text: str, inline: re.Pattern[str] = _INLINE):
     """Bloques con fence de Python explícito, más spans entre backticks."""
     yield from _FENCE_PYTHON.finditer(readme_text)
-    yield from _INLINE.finditer(_sin_fences(readme_text))
+    yield from inline.finditer(_sin_fences(readme_text))
 
 
 def _vive_dentro_de_una_ruta(fragmento: str, inicio: int, fin: int) -> bool:
@@ -123,7 +136,7 @@ def _vive_dentro_de_una_ruta(fragmento: str, inicio: int, fin: int) -> bool:
 
 
 def _citas_del_proyecto(
-    readme_text: str, espacio_propio: frozenset[str]
+    readme_text: str, espacio_propio: frozenset[str], inline: re.Pattern[str] = _INLINE
 ) -> list[tuple[str, str, int]]:
     """Identificadores que el README le atribuye a ESTE repo, con su línea.
 
@@ -135,7 +148,7 @@ def _citas_del_proyecto(
     como parte del proyecto: `from <proyecto> import X` o `<proyecto>.X`.
     """
     citas: list[tuple[str, str, int]] = []
-    for bloque in _fragmentos_de_codigo(readme_text):
+    for bloque in _fragmentos_de_codigo(readme_text, inline):
         fragmento = bloque.group(0)
         base = bloque.start()
 
@@ -170,7 +183,8 @@ def _revisar_identificadores(
     # Se mira primero si hay algún fragmento de código. Sin esto, todo repo
     # con README pagaría el parseo completo del árbol aunque su README no
     # traiga un solo ejemplo de uso.
-    if next(_fragmentos_de_codigo(readme_text), None) is None:
+    inline = _inline_de(readme_path)
+    if next(_fragmentos_de_codigo(readme_text, inline), None) is None:
         return []
 
     indice = symbol_index.construir(ctx.path)
@@ -180,7 +194,7 @@ def _revisar_identificadores(
     espacio_propio = frozenset(
         set(declared_project_names(ctx.path)) | set(indice.paquetes)
     )
-    citas = _citas_del_proyecto(readme_text, espacio_propio)
+    citas = _citas_del_proyecto(readme_text, espacio_propio, inline)
     faltantes = [(p, n, ln) for p, n, ln in citas if not indice.resuelve(p, n)]
     if not faltantes:
         return []

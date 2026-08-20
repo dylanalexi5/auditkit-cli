@@ -9,6 +9,7 @@ from pathlib import Path
 
 from auditor.core.models import Evidence, Verdict, VerifierResult, worst_verdict
 from auditor.core.repo_context import (
+    KNOWN_IMPORT_TO_PACKAGE,
     RepoContext,
     declared_project_names,
     is_test_fixture_path,
@@ -66,17 +67,6 @@ _CLI_ONLY_PACKAGES = {
     "mkdocs",
     "detect_secrets",
 }
-
-# Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
-# Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
-_KNOWN_IMPORT_TO_PACKAGE = {
-    "sklearn": "scikit-learn",
-    "bs4": "beautifulsoup4",
-    "pil": "pillow",
-    "yaml": "pyyaml",
-    "cv2": "opencv-python",
-}
-
 
 def _is_safe_requirement_line(line: str) -> bool:
     """Rechaza VCS/URL/local-path requirements - pip-audit los resolveria via pip,
@@ -332,7 +322,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         if module_name in stdlib_names or module_name in local_names:
             continue
 
-        mapped_package = _KNOWN_IMPORT_TO_PACKAGE.get(module_name)
+        mapped_package = KNOWN_IMPORT_TO_PACKAGE.get(module_name)
         mapped_normalized = (
             normalize_dependency_name(mapped_package) if mapped_package else None
         )
@@ -377,7 +367,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
 
     effectively_used = used_imports | {
         normalize_dependency_name(pkg)
-        for imp, pkg in _KNOWN_IMPORT_TO_PACKAGE.items()
+        for imp, pkg in KNOWN_IMPORT_TO_PACKAGE.items()
         if imp in used_imports
     }
     no_reportables = _transitive_pins(ctx.path) | _CLI_ONLY_PACKAGES

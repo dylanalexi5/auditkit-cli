@@ -11,6 +11,11 @@ usa. Los que quedan cubren lo que sobrevivió — carga perezosa, degradación,
 normalización y orden.
 """
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -345,3 +350,43 @@ def test_modelo_real_ordena_por_tema_en_los_dos_idiomas(pregunta: str) -> None:
     )
 
     assert resultado[0][0] == 1
+
+
+@pytest.mark.slow
+def test_cargar_el_modelo_no_escribe_nada_en_la_salida() -> None:
+    """`--ask` imprimia ruido de HuggingFace por stderr antes de su primera
+    linea util:
+
+        Warning: You are sending unauthenticated requests to the HF Hub...
+        Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+
+    Medido cual apaga cual, en subprocesos separados: la barra la apaga
+    `HF_HUB_DISABLE_PROGRESS_BARS`, el warning `HF_HUB_VERBOSITY`, y
+    `TRANSFORMERS_VERBOSITY` / `HF_HUB_DISABLE_TELEMETRY` no apagan ninguno.
+
+    Corre en un subproceso porque las variables se leen cuando
+    `huggingface_hub` se importa: dentro de este proceso ya esta importado.
+    """
+    entorno = {k: v for k, v in os.environ.items()
+               if k not in ("HF_HUB_DISABLE_PROGRESS_BARS", "HF_HUB_VERBOSITY")}
+    entorno["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    entorno["PYTHONIOENCODING"] = "utf-8"
+
+    codigo = (
+        "from auditor.core import embedding_index; "
+        "embedding_index._cargar_encoder()"
+    )
+    resultado = subprocess.run(
+        [sys.executable, "-c", codigo],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=entorno,
+        timeout=300,
+        check=False,
+    )
+
+    assert resultado.returncode == 0, resultado.stderr
+    assert resultado.stdout == ""
+    assert resultado.stderr == ""
