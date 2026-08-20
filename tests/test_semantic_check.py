@@ -107,6 +107,7 @@ def test_extract_claims_calls_api_with_expected_params() -> None:
     assert kwargs["temperature"] == 0
     assert kwargs["timeout"] == 30
     assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["reasoning_effort"] == "none"
 
 
 def test_verify_does_not_match_unrelated_claims_via_project_name(
@@ -481,3 +482,52 @@ def test_verify_real_api_extracts_and_cross_references(tmp_path: Path) -> None:
     if result.verdict == Verdict.APROBADO_CON_OBSERVACIONES:
         assert result.evidence
         assert result.evidence[0].file == "README.md"
+
+
+def test_verify_recorta_el_readme_antes_de_mandarlo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El README entero es el payload del verificador, y el limite de tokens
+    por minuto de la API es un techo duro. Medido contra el README real de
+    `pytransitions/transitions` (98.699 caracteres): la peticion se rechaza
+    con 413 y el verificador se saltaba entero."""
+    (tmp_path / "README.md").write_text("x" * 30_000, encoding="utf-8")
+    fake_client = _FakeClient(content=_claims_payload())
+    monkeypatch.setattr(semantic_check, "get_client", lambda: fake_client)
+
+    semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    enviado = fake_client.chat.completions.received_kwargs["messages"][1]["content"]
+    # Literal a proposito, no semantic_check._MAX_README_CHARS.
+    assert len(enviado) == 24_000
+
+
+def test_verify_declara_que_el_readme_quedo_recortado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Analizar un pedazo y devolver APROBADO seria decir "no encontre nada"
+    cuando lo cierto es "no lo mire entero" - la misma distincion que
+    `symbol_index` marca con `truncado`."""
+    (tmp_path / "README.md").write_text("x" * 30_000, encoding="utf-8")
+    fake_client = _FakeClient(content=_claims_payload())
+    monkeypatch.setattr(semantic_check, "get_client", lambda: fake_client)
+
+    resultado = semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    assert resultado.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert len(resultado.evidence) == 1
+    assert "24000" in resultado.evidence[0].note
+    assert "30000" in resultado.evidence[0].note
+
+
+def test_verify_no_declara_recorte_si_el_readme_entra_entero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "README.md").write_text("x" * 24_000, encoding="utf-8")
+    fake_client = _FakeClient(content=_claims_payload())
+    monkeypatch.setattr(semantic_check, "get_client", lambda: fake_client)
+
+    resultado = semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    assert resultado.verdict == Verdict.APROBADO
+    assert resultado.evidence == []
