@@ -29,8 +29,39 @@ def is_test_fixture_path(relative_parts: tuple[str, ...]) -> bool:
     )
 
 
+# Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
+# Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
+#
+# Vive aca y no en `deps_check.py` por la misma razon que
+# `is_test_fixture_path`: lo comparten dos consumidores. `build_check.py` lo
+# necesita para el downgrade de un ModuleNotFoundError, y sin el mapeo
+# comparaba el nombre del IMPORT contra los nombres DECLARADOS. Medido en
+# `arrow-py/arrow`, que declara `python-dateutil` e importa `dateutil`: un
+# fallo de nuestro propio entorno se reportaba como NO_SOSTENIBLE del repo
+# auditado, ademas de los dos hallazgos falsos de `deps_check`.
+KNOWN_IMPORT_TO_PACKAGE = {
+    "sklearn": "scikit-learn",
+    "bs4": "beautifulsoup4",
+    "pil": "pillow",
+    "yaml": "pyyaml",
+    "cv2": "opencv-python",
+    "dateutil": "python-dateutil",
+}
+
+
 def normalize_dependency_name(name: str) -> str:
     return name.split(".")[0].strip().lower().replace("-", "_")
+
+
+def declarado_como(module_name: str, declared: frozenset[str]) -> str | None:
+    """El paquete declarado que satisface este import por mapeo conocido.
+
+    None si no hay mapeo, o si el paquete mapeado tampoco esta declarado.
+    """
+    paquete = KNOWN_IMPORT_TO_PACKAGE.get(module_name)
+    if paquete is None:
+        return None
+    return paquete if normalize_dependency_name(paquete) in declared else None
 
 
 def _parse_requirements_txt(path: Path) -> set[str]:
