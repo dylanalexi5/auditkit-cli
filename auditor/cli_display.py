@@ -53,8 +53,12 @@ def _recortar(nota: str) -> str:
     if len(lineas) <= _MAX_LINEAS_NOTA:
         return nota
     sobran = len(lineas) - _MAX_LINEAS_NOTA
+    plural = "s" if sobran != 1 else ""
     return "\n".join(
-        [*lineas[:_MAX_LINEAS_NOTA], f"[dim](+{sobran} líneas — usá --json para el detalle)[/dim]"]
+        [
+            *lineas[:_MAX_LINEAS_NOTA],
+            f"[dim](+{sobran} línea{plural} — usá --json para el detalle)[/dim]",
+        ]
     )
 
 

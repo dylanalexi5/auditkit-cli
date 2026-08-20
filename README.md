@@ -35,6 +35,24 @@ chequeo de credencial. Ambos requieren `GROQ_API_KEY` (en el entorno o en un
 `.env` de la raíz); sin ella se saltan con una observación explícita en el
 reporte, nunca en silencio.
 
+### Salida
+
+En una terminal, cada verificador muestra un spinner mientras corre y su
+✅/🔄/❌ apenas termina, y el reporte final sale como panel y tabla con color.
+
+**Redirigido a un archivo o a un pipe, la salida es el mismo texto plano de
+siempre** — sin un solo escape ANSI. El progreso va por `stderr`, así que
+`python -m auditor <url> > salida.txt` deja el archivo con el reporte y nada
+más, mientras el spinner se sigue viendo en la terminal. `--json` apaga la
+interfaz entera: es una interfaz de máquina y un solo escape la rompería.
+Se respeta `NO_COLOR`.
+
+Es una capa de presentación aparte (`auditor/cli_display.py`): no puede
+cambiar un veredicto ni esconder un hallazgo. Sí recorta una nota muy larga
+—la salida cruda de pytest que `build_check` mete en su evidencia— y declara
+cuánto dejó afuera, con el detalle completo disponible en `--json`. Diseño en
+[docs/adr/0006-interfaz-terminal.md](docs/adr/0006-interfaz-terminal.md).
+
 ## Verificadores
 
 - **secrets** — busca secretos reales en el código (`detect-secrets`).

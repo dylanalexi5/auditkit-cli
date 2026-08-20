@@ -244,3 +244,75 @@ def test_sin_progreso_ni_salteado_ni_hecho_escriben_nada() -> None:
     display.termina("secrets", Verdict.APROBADO)
 
     assert salida.getvalue() == ""
+
+
+def _con_nota(nota: str) -> AuditReport:
+    return AuditReport(
+        final_verdict=Verdict.NO_SOSTENIBLE,
+        verifier_results={
+            "build_check": VerifierResult(
+                verdict=Verdict.NO_SOSTENIBLE,
+                evidence=[Evidence(file="pytest", line=0, note=nota)],
+            )
+        },
+        skipped_verifiers=[],
+    )
+
+
+def _render(reporte: AuditReport) -> str:
+    display, salida, _ = _display(rico=True)
+    display.reporte(reporte, "https://github.com/demo/demo")
+    return salida.getvalue()
+
+
+def test_una_nota_corta_no_se_recorta() -> None:
+    """Tres lineas entran enteras. El literal va explicito, no
+    `cli_display._MAX_LINEAS_NOTA`: comparar contra la misma constante que se
+    esta probando pasa con cualquier valor."""
+    texto = _render(_con_nota("uno\ndos\ntres"))
+
+    assert "(+" not in texto
+    assert "tres" in texto
+
+
+def test_una_nota_con_una_linea_de_mas_lo_dice_en_singular() -> None:
+    texto = _render(_con_nota("uno\ndos\ntres\ncuatro"))
+
+    assert "+1 línea " in texto
+    assert "+1 líneas" not in texto
+    assert "cuatro" not in texto
+
+
+def test_una_nota_con_varias_de_mas_cuenta_bien_cuantas() -> None:
+    """El `- _MAX_LINEAS_NOTA` de la resta sobrevivia mutado a `+`, `*` y
+    todo lo demas: sin un numero exacto esperado, cualquier cuenta pasa."""
+    texto = _render(_con_nota("\n".join(f"linea {n}" for n in range(9))))
+
+    assert "+6 líneas" in texto
+
+
+def test_el_nombre_del_verificador_aparece_una_sola_vez() -> None:
+    """Con dos evidencias, el nombre y el veredicto van en la primera fila y
+    las demas quedan vacias. `indice == 0` mutado a `!=`, `>` o `<=` repetia
+    el nombre en cada fila o lo escondia entero."""
+    reporte = AuditReport(
+        final_verdict=Verdict.NO_SOSTENIBLE,
+        verifier_results={
+            "deps_check": VerifierResult(
+                verdict=Verdict.NO_SOSTENIBLE,
+                evidence=[
+                    Evidence(file="a.txt", line=1, note="primera"),
+                    Evidence(file="b.txt", line=2, note="segunda"),
+                    Evidence(file="c.txt", line=3, note="tercera"),
+                ],
+            )
+        },
+        skipped_verifiers=[],
+    )
+
+    texto = _render(reporte)
+
+    assert texto.count("deps_check") == 1
+    assert texto.count("NO_SOSTENIBLE") == 2  # el del panel final y el de la fila
+    for nota in ("primera", "segunda", "tercera"):
+        assert nota in texto
