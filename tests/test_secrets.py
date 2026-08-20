@@ -341,3 +341,47 @@ def test_sin_baseline_el_comportamiento_no_cambia(tmp_path: Path) -> None:
 
     assert result.verdict == Verdict.NO_SOSTENIBLE
     assert ".secrets.baseline" not in result.evidence[0].note
+
+
+def test_un_baseline_con_entradas_malformadas_no_tumba_el_verificador(
+    tmp_path: Path,
+) -> None:
+    """El baseline lo escribe el repo auditado, asi que puede venir con
+    cualquier forma. Las entradas que no son un dict con `hashed_secret` se
+    saltean, y las validas del mismo archivo siguen valiendo.
+
+    `and` -> `or` sobrevivia: con `or`, una entrada que no es dict explota en
+    `item.get` y una sin `hashed_secret` explota en `item[...]`. Un repo
+    ajeno no puede tumbar un verificador que corre por defecto.
+    """
+    from detect_secrets.core.potential_secret import PotentialSecret
+
+    (tmp_path / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    (tmp_path / ".secrets.baseline").write_text(
+        json.dumps(
+            {
+                "version": "1.5.0",
+                "results": {
+                    "config.py": [
+                        "esto no es un dict",
+                        {"type": "AWS Access Key", "line_number": 1},
+                        {
+                            "type": "AWS Access Key",
+                            "filename": "config.py",
+                            "hashed_secret": PotentialSecret.hash_secret(
+                                "AKIAIOSFODNN7EXAMPLE"
+                            ),
+                            "is_verified": False,
+                            "line_number": 1,
+                        },
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert ".secrets.baseline" in result.evidence[0].note
