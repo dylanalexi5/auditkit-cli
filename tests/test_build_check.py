@@ -172,14 +172,25 @@ def test_sin_ubicacion_en_la_salida_lo_dice_en_vez_de_inventarla(
     tmp_path: Path,
 ) -> None:
     """Caso real y comun: el fallo ocurre en un fixture de `conftest.py`, asi
-    que pytest nombra el archivo de test en el resumen pero la unica linea
-    que imprime es la del conftest. No hay ubicacion para el archivo que se
-    reporta, y eso se dice en vez de caer en 0 o en 1 en silencio."""
+    que pytest nombra el archivo de test en el resumen pero las lineas que
+    imprime son las de OTROS archivos. No hay ubicacion para el archivo que
+    se reporta, y eso se dice en vez de caer en 0 o en 1 en silencio.
+
+    El helper se llama `zhelpers.py` a proposito, no `helpers.py`: ordena
+    DESPUES de `test_a.py`. `==` -> `>=` sobrevivia con cualquier nombre que
+    ordenara antes, porque la comparacion daba False igual. Con uno que
+    ordena despues, el mutante toma la linea del helper y la reporta como si
+    fuera del archivo de test — una ubicacion fabricada, que es justo lo que
+    este test existe para impedir."""
     _write_pyproject(tmp_path)
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()
+    (tests_dir / "zhelpers.py").write_text(
+        'def explota():\n    raise RuntimeError("desde el helper")\n', encoding="utf-8"
+    )
     (tests_dir / "conftest.py").write_text(
-        'import pytest\n\n\n@pytest.fixture\ndef roto():\n    raise RuntimeError("explota")\n',
+        "import pytest\n\nfrom zhelpers import explota\n\n\n"
+        "@pytest.fixture\ndef roto():\n    explota()\n",
         encoding="utf-8",
     )
     (tests_dir / "test_a.py").write_text(
