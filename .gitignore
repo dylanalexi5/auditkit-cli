@@ -6,3 +6,9 @@ graphify-out/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+
+# Configuracion local de Claude Code: rutas absolutas de esta maquina.
+# Las instrucciones portables (.claude/CLAUDE.md) si van al repo.
+.claude/settings.json
+.claude/settings.local.json
+.claude/skills/
