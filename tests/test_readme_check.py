@@ -58,7 +58,12 @@ def test_verify_no_coverage_claim_is_aprobado(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _repo_demo(tmp_path: Path, readme: str, codigo: str = "def existe():\n    pass\n"):
+def _repo_demo(
+    tmp_path: Path,
+    readme: str,
+    codigo: str = "def existe():\n    pass\n",
+    nombre_readme: str = "README.md",
+):
     """Repo minimo que se declara a si mismo 'demo' y expone un paquete
     `demo/` importable."""
     (tmp_path / "pyproject.toml").write_text(
@@ -67,7 +72,7 @@ def _repo_demo(tmp_path: Path, readme: str, codigo: str = "def existe():\n    pa
     paquete = tmp_path / "demo"
     paquete.mkdir()
     (paquete / "__init__.py").write_text(codigo, encoding="utf-8")
-    (tmp_path / "README.md").write_text(readme, encoding="utf-8")
+    (tmp_path / nombre_readme).write_text(readme, encoding="utf-8")
     return RepoContext.from_path(tmp_path)
 
 
@@ -426,3 +431,54 @@ def test_sin_pyproject_el_paquete_importable_del_repo_alcanza(tmp_path: Path) ->
     result = readme_check.verify(RepoContext.from_path(tmp_path))
 
     assert [e.line for e in result.evidence] == [4]
+
+
+def test_en_rst_el_backtick_simple_no_delimita_codigo(tmp_path: Path) -> None:
+    """Caso real de `arrow-py/arrow`, README.rst:116. En RST el backtick
+    simple es una referencia —tipicamente un link— y el literal se escribe
+    con backtick doble. Tratarlo como markdown hacia que el texto del link
+    entrara como ejemplo de uso: se reportaba "el ejemplo de uso del README
+    cita 'arrow.readthedocs' pero 'readthedocs' no esta definido"."""
+    ctx = _repo_demo(
+        tmp_path,
+        "Documentation\n-------------\n\n"
+        "For full documentation, please visit `demo.readthedocs.io "
+        "<https://demo.readthedocs.io>`_.\n",
+        nombre_readme="README.rst",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_en_rst_el_backtick_doble_sigue_siendo_codigo(tmp_path: Path) -> None:
+    """Control positivo: apagar el backtick simple no puede apagar el
+    chequeo entero en los repos .rst."""
+    ctx = _repo_demo(
+        tmp_path,
+        "demo\n====\n\nUsa ``demo.fantasma()`` para empezar.\n",
+        nombre_readme="README.rst",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert [e.line for e in result.evidence] == [4]
+    assert "fantasma" in result.evidence[0].note
+
+
+def test_en_un_readme_txt_el_backtick_simple_sigue_siendo_codigo(tmp_path: Path) -> None:
+    """`== ".rst"` -> `>= ".rst"` sobrevivia: comparar sufijos con `>=` mete
+    en la regla de RST a todo lo que ordene despues, `.txt` incluido, y ahi
+    el backtick simple SI delimita codigo."""
+    ctx = _repo_demo(
+        tmp_path,
+        "demo\n\nUsa `demo.fantasma()` para empezar.\n",
+        nombre_readme="README.txt",
+    )
+
+    result = readme_check.verify(ctx)
+
+    assert [e.line for e in result.evidence] == [3]
+    assert "fantasma" in result.evidence[0].note

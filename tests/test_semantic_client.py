@@ -5,7 +5,7 @@ import pytest
 from auditor.core import semantic_client
 
 _MENSAJE_ESPERADO = (
-    "Falta GROQ_API_KEY en .env — el verificador semántico no puede correr sin ella"
+    "Falta GROQ_API_KEY en .env — --semantic y --triage no pueden correr sin ella"
 )
 
 

@@ -210,3 +210,66 @@ de escribir el verificador (no se asume, se probó).
   `count(..., 1, ...)` por casualidad del texto de prueba.
 - `ruff check .` limpio.
 - Commit en rama aparte, PR en draft — no se mergea sin revisión.
+
+## Addendum — el README real no entra en una petición (medido)
+
+El verificador se validó siempre contra READMEs de fixture y contra el de
+`psf/black`. La primera corrida contra un repo grande nunca usado antes,
+`pytransitions/transitions`, lo rompió en silencio: el reporte decía
+*"verificador semántico saltado: la API no respondió"*, que es exactamente
+el modo de falla que un auditor de credibilidad no se puede permitir.
+
+Medido, no supuesto. Dos causas distintas, encadenadas:
+
+**1. El razonamiento del modelo se comía el presupuesto de salida.**
+Con 12.000 caracteres de README, `qwen/qwen3.6-27b` devolvía
+`400 json_validate_failed` con `failed_generation: ""` — cadena vacía: el
+modelo gastó su salida razonando y no emitió ni un carácter de JSON. El
+mismo pedido con `reasoning_effort="none"` devuelve 15 afirmaciones bien
+formadas. Extraer afirmaciones citando texto literal no necesita cadena de
+razonamiento, así que la opción no cuesta calidad.
+
+| modelo | `reasoning_effort` | resultado (12.000 chars) |
+|---|---|---|
+| `qwen/qwen3.6-27b` | (defecto) | `400 json_validate_failed`, generación vacía |
+| `qwen/qwen3.6-27b` | `none` | 15 afirmaciones, 969 tokens de salida |
+| `openai/gpt-oss-20b` | `low` | 9 afirmaciones |
+| `openai/gpt-oss-120b` | `low` | 11 afirmaciones |
+
+**2. El README entero no entra, y ningún modelo de la cuenta lo arregla.**
+El README de `transitions` tiene 98.699 caracteres ≈ 24.807 tokens, contra
+un techo de 8.000 tokens por minuto:
+
+| modelo | TPM | 98.699 chars |
+|---|---|---|
+| `qwen/qwen3.6-27b` | 8.000 | `413 Request too large` |
+| `openai/gpt-oss-120b` | 8.000 | `413 Request too large` |
+| `openai/gpt-oss-20b` | 8.000 | `413 Request too large` |
+| `groq/compound-mini` | 70.000 | `413 Request Entity Too Large` |
+| `groq/compound` | 70.000 | `429 Rate limit` |
+
+Ni el modelo con 70.000 TPM lo acepta. Trocear el README tampoco sirve: el
+techo es por minuto y acumulativo, así que N pedidos consumen lo mismo que
+uno solo.
+
+**Decisión: recortar a 24.000 caracteres y decirlo.** Medido cuánto entra,
+con prompt de sistema y respuesta contados adentro del mismo techo:
+
+| README enviado | tokens totales | resultado |
+|---|---|---|
+| 20.000 chars | 6.955 | OK, 26 afirmaciones |
+| 24.000 chars | 7.850 | OK, 24 afirmaciones |
+| 28.000 chars | 8.710 | pasa el techo de 8.000 |
+
+24.000 es el escalón medido más grande que entra completo.
+
+Lo que queda afuera **no se analiza, y el veredicto lo dice**: el resultado
+suma una evidencia (`solo se analizaron los primeros 24000 de N caracteres`)
+y no puede ser APROBADO. Es la misma distinción que `symbol_index` marca con
+`truncado` (ADR 0004): "no encontré nada" y "no lo miré entero" son
+afirmaciones distintas, y confundirlas es la clase de mentira que esta
+herramienta existe para no dejar pasar.
+
+**Deuda que esto deja abierta, a nombre:** en un README de 98.699
+caracteres se verifica el 24%. Subirlo depende de un plan de pago con más
+TPM, no de código.

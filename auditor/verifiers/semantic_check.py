@@ -10,6 +10,25 @@ from auditor.core.semantic_client import MissingApiKeyError, get_client
 
 _MODEL = "qwen/qwen3.6-27b"
 _TIMEOUT_SECONDS = 30
+# El README entero es el payload de este verificador, y el límite de tokens
+# por minuto de la API es un techo duro que no depende de nosotros. Medido
+# contra el README real de `pytransitions/transitions` (98.699 caracteres):
+#
+#     98.699 chars -> 413, "Request too large ... TPM: Limit 8000,
+#                     Requested 24807"
+#
+# Ningún modelo disponible en la cuenta lo acepta entero (los `compound`,
+# con 70.000 TPM, devuelven 413 igual por tamaño de petición). Medido cuánto
+# entra, con el prompt de sistema y la respuesta contados adentro del mismo
+# techo de 8000:
+#
+#     20.000 chars -> total 6.955 tokens
+#     24.000 chars -> total 7.850 tokens
+#     28.000 chars -> total 8.710 tokens  (pasa el techo)
+#
+# 24.000 es el escalón medido más grande que entra completo. Lo que queda
+# afuera no se analiza y el veredicto lo dice — ver `verify`.
+_MAX_README_CHARS = 24_000
 _README_NAMES = ("README.md", "README.rst", "README.txt", "README")
 _KEYWORD = re.compile(r"[a-záéíóúñ0-9]{4,}")
 _STOPWORDS = frozenset(
@@ -30,6 +49,32 @@ _STOPWORDS = frozenset(
     }
 )
 _UNAVAILABLE_NOTE_TEMPLATE = "verificador semántico saltado: {reason}"
+
+# No toda evidencia es un hallazgo. Los verificadores también escriben notas
+# que dicen "esto está bien" o "esto no lo miramos", y cruzarlas contra una
+# afirmación del README produce una contradicción donde no hay ninguna. Dos
+# casos reales medidos:
+#
+#   transitions  el badge de Build Status salió "contradicho" por
+#                "'mypy' ... es una herramienta de build/automatizacion"
+#                (comparten el token 'build', y nada más)
+#   arrow        "Support for Python 3.8+" salió "contradicho" por
+#                "'dateutil' ... mapeo conocido, no es un fallo real"
+#                (comparten el token 'python')
+#
+# El filtro es por texto, no estructural, y eso es deuda a nombre: la forma
+# correcta sería que `Evidence` dijera si es un hallazgo o una nota, en vez
+# de que este módulo reconozca las frases que escriben los otros. Se hace
+# así porque marcar la evidencia toca los cuatro verificadores, el reporte y
+# el JSON; la lista queda acá, corta y explícita, hasta que haga falta.
+_NOTAS_BENIGNAS = (
+    "no es un fallo real",
+    "herramienta de build/automatizacion",
+    "no verificado",
+    "no verificadas",
+    "no se verificaron",
+    "sin verificar",
+)
 
 _SYSTEM_PROMPT = (
     "Extraés afirmaciones verificables de un README de un repositorio de "
@@ -79,6 +124,14 @@ def _extract_claims(client: groq.Groq, readme_text: str) -> list[dict] | None:
             ],
             temperature=0,
             response_format={"type": "json_object"},
+            # Sin esto el modelo gastaba TODO su presupuesto de salida
+            # razonando y devolvía la respuesta vacía, que la API rechaza con
+            # `400 json_validate_failed` y `failed_generation: ""`. Se veía
+            # como "la API no respondió" sobre cualquier README grande, sin
+            # una sola pista de que el problema era el razonamiento y no el
+            # tamaño. Extraer afirmaciones citando texto literal no necesita
+            # cadena de razonamiento.
+            reasoning_effort="none",
             timeout=_TIMEOUT_SECONDS,
         )
     except groq.APIError:
@@ -144,6 +197,12 @@ def _locate_quote(readme_text: str, quote: str) -> int | None:
     return readme_text.count("\n", 0, index) + 1
 
 
+def _es_benigna(nota: str) -> bool:
+    """La nota dice "esto está bien" o "esto no lo miramos", no un hallazgo."""
+    minuscula = nota.lower()
+    return any(frase in minuscula for frase in _NOTAS_BENIGNAS)
+
+
 def _find_contradicting_evidence(
     claim_keywords: set[str],
     other_results: dict[str, VerifierResult],
@@ -153,6 +212,8 @@ def _find_contradicting_evidence(
         return None
     for result in other_results.values():
         for item in result.evidence:
+            if _es_benigna(item.note):
+                continue
             if claim_keywords & _keywords(item.note, exclude):
                 return item
     return None
@@ -169,14 +230,28 @@ def verify(ctx: RepoContext, other_results: dict[str, VerifierResult]) -> Verifi
         return _skipped("falta GROQ_API_KEY")
 
     readme_text = readme_path.read_text(encoding="utf-8", errors="ignore")
-    claims = _extract_claims(client, readme_text)
+    claims = _extract_claims(client, readme_text[:_MAX_README_CHARS])
     if claims is None:
         return _skipped("la API no respondió o la respuesta no era el JSON esperado")
-    if not claims:
-        return VerifierResult(verdict=Verdict.APROBADO, evidence=[])
+
+    evidence: list[Evidence] = []
+    if len(readme_text) > _MAX_README_CHARS:
+        # Analizar un pedazo y devolver APROBADO sería decir "no encontré
+        # nada" cuando lo cierto es "no lo miré entero" — la misma distinción
+        # que `symbol_index` marca con `truncado`.
+        evidence.append(
+            Evidence(
+                file=readme_path.name,
+                line=0,
+                note=(
+                    f"solo se analizaron los primeros {_MAX_README_CHARS} de "
+                    f"{len(readme_text)} caracteres del README: el resto quedó "
+                    "sin verificar"
+                ),
+            )
+        )
 
     exclude = _project_name_tokens(ctx.path)
-    evidence: list[Evidence] = []
     for claim in claims:
         afirmacion = claim["afirmacion"]
         cita = claim["cita_textual_del_readme"]

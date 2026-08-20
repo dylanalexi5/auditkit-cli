@@ -5,7 +5,11 @@ import sys
 from pathlib import Path
 
 from auditor.core.models import Evidence, Verdict, VerifierResult
-from auditor.core.repo_context import RepoContext, normalize_dependency_name
+from auditor.core.repo_context import (
+    RepoContext,
+    declarado_como,
+    normalize_dependency_name,
+)
 
 _TIMEOUT_SECONDS = 300
 _PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
@@ -71,8 +75,13 @@ def verify(ctx: RepoContext) -> VerifierResult:
         ),
         None,
     )
-    is_declared_missing_dep = (
-        missing_module is not None and missing_module in ctx.declared_dependencies
+    # El mapeo import->paquete cuenta acá igual que en `deps_check`: mirar
+    # solo el nombre del import convertía un fallo de NUESTRO entorno en un
+    # NO_SOSTENIBLE del repo auditado. Medido en `arrow-py/arrow`, que
+    # declara `python-dateutil` e importa `dateutil`.
+    is_declared_missing_dep = missing_module is not None and (
+        missing_module in ctx.declared_dependencies
+        or declarado_como(missing_module, ctx.declared_dependencies) is not None
     )
 
     evidence = [

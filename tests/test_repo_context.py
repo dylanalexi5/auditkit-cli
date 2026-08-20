@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from auditor.core.repo_context import RepoContext
+from auditor.core.repo_context import RepoContext, declarado_como
 
 
 def test_from_path_parses_requirements_txt(tmp_path: Path) -> None:
@@ -61,3 +61,18 @@ def test_from_path_survives_malformed_pyproject_toml(tmp_path: Path) -> None:
     ctx = RepoContext.from_path(tmp_path)
 
     assert ctx.declared_dependencies == {"click"}
+
+
+def test_declarado_como_devuelve_el_paquete_cuando_esta_declarado() -> None:
+    """`arrow-py/arrow` declara `python-dateutil` e importa `dateutil`."""
+    assert declarado_como("dateutil", frozenset({"python_dateutil"})) == "python-dateutil"
+
+
+def test_declarado_como_es_none_si_el_paquete_mapeado_no_esta_declarado() -> None:
+    """El mapeo existe pero nadie declaro el paquete: sigue siendo un import
+    sin declarar, no un mapeo que lo salve."""
+    assert declarado_como("dateutil", frozenset({"otra_cosa"})) is None
+
+
+def test_declarado_como_es_none_sin_mapeo_conocido() -> None:
+    assert declarado_como("modulo_sin_mapeo", frozenset({"modulo_sin_mapeo"})) is None

@@ -7,7 +7,7 @@ import pytest
 
 from auditor.core.models import Evidence, Verdict, VerifierResult
 from auditor.core.repo_context import RepoContext
-from auditor.core.semantic_client import MissingApiKeyError
+from auditor.core.semantic_client import MissingApiKeyError, get_client
 from auditor.verifiers import semantic_check
 
 
@@ -107,6 +107,7 @@ def test_extract_claims_calls_api_with_expected_params() -> None:
     assert kwargs["temperature"] == 0
     assert kwargs["timeout"] == 30
     assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["reasoning_effort"] == "none"
 
 
 def test_verify_does_not_match_unrelated_claims_via_project_name(
@@ -453,11 +454,50 @@ def test_verify_timeout_is_observaciones_not_crash(
     assert len(result.evidence) == 1
 
 
+def _sonda_de_cuota():
+    """Una llamada minima con el system prompt real. Devuelve el 429 si no
+    hay cuota, o None si la hay."""
+    try:
+        get_client().chat.completions.create(
+            model=semantic_check._MODEL,
+            messages=[
+                {"role": "system", "content": semantic_check._SYSTEM_PROMPT},
+                {"role": "user", "content": "demo. Sonda de cuota."},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+            reasoning_effort="none",
+            timeout=20,
+        )
+    except groq.RateLimitError as exc:
+        return exc
+    return None
+
+
+@pytest.fixture
+def groq_con_cuota():
+    """Salta el test si Groq esta sin cuota, en vez de dejarlo fallar.
+
+    Mismo criterio que el fixture homonimo de `test_triage_agent.py`, con
+    la diferencia importante de cual es el riesgo: alla la falta de cuota
+    hacia PASAR tests por el camino degradado (confianza falsa), y aca los
+    hace FALLAR, porque `verify` devuelve el camino de `_skipped` y el test
+    espera una cita real. Un fallo por cuota agotada no dice nada sobre el
+    codigo.
+
+    La sonda usa el system prompt real para tener el tamano representativo:
+    una llamada de 3 tokens puede entrar donde una de 600 no.
+    """
+    exc = _sonda_de_cuota()
+    if exc is not None:
+        pytest.skip(f"Groq sin cuota, validacion real no verificada: {exc}")
+
+
 @pytest.mark.skipif(
     not (os.environ.get("GROQ_API_KEY") or Path(".env").is_file()),
     reason="requiere GROQ_API_KEY real",
 )
-def test_verify_real_api_extracts_and_cross_references(tmp_path: Path) -> None:
+def test_verify_real_api_extracts_and_cross_references(tmp_path: Path, groq_con_cuota) -> None:
     (tmp_path / "README.md").write_text(
         "# demo\n\nThis project has 100% test coverage and is production-ready.\n"
     )
@@ -477,7 +517,218 @@ def test_verify_real_api_extracts_and_cross_references(tmp_path: Path) -> None:
 
     result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
 
+    if result.evidence and result.evidence[0].file == "(sin verificar)":
+        # La cuota se puede agotar ENTRE la sonda del fixture y esta llamada.
+        # Si al re-sondear sigue habiendo cuota, entonces la peticion real
+        # esta rota —el caso del `400 json_validate_failed`, que se veia
+        # exactamente asi— y eso si es un fallo del codigo.
+        exc = _sonda_de_cuota()
+        if exc is None:
+            pytest.fail(f"la API no respondio y hay cuota: {result.evidence[0].note}")
+        pytest.skip(f"Groq sin cuota, validacion real no verificada: {exc}")
+
     assert result.verdict in (Verdict.APROBADO, Verdict.APROBADO_CON_OBSERVACIONES)
     if result.verdict == Verdict.APROBADO_CON_OBSERVACIONES:
         assert result.evidence
         assert result.evidence[0].file == "README.md"
+
+
+def test_verify_recorta_el_readme_antes_de_mandarlo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El README entero es el payload del verificador, y el limite de tokens
+    por minuto de la API es un techo duro. Medido contra el README real de
+    `pytransitions/transitions` (98.699 caracteres): la peticion se rechaza
+    con 413 y el verificador se saltaba entero."""
+    (tmp_path / "README.md").write_text("x" * 30_000, encoding="utf-8")
+    fake_client = _FakeClient(content=_claims_payload())
+    monkeypatch.setattr(semantic_check, "get_client", lambda: fake_client)
+
+    semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    enviado = fake_client.chat.completions.received_kwargs["messages"][1]["content"]
+    # Literal a proposito, no semantic_check._MAX_README_CHARS.
+    assert len(enviado) == 24_000
+
+
+def test_verify_declara_que_el_readme_quedo_recortado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Analizar un pedazo y devolver APROBADO seria decir "no encontre nada"
+    cuando lo cierto es "no lo mire entero" - la misma distincion que
+    `symbol_index` marca con `truncado`."""
+    (tmp_path / "README.md").write_text("x" * 30_000, encoding="utf-8")
+    fake_client = _FakeClient(content=_claims_payload())
+    monkeypatch.setattr(semantic_check, "get_client", lambda: fake_client)
+
+    resultado = semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    assert resultado.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert len(resultado.evidence) == 1
+    assert "24000" in resultado.evidence[0].note
+    assert "30000" in resultado.evidence[0].note
+    # `line=0` es "sin ubicacion", la misma convencion que `_skipped`. Fijarlo
+    # no es decorado: apuntar a README.md:1 seria fabricar una ubicacion, el
+    # bug que este modulo ya arreglo una vez en `_locate_quote`.
+    assert resultado.evidence[0].file == "README.md"
+    assert resultado.evidence[0].line == 0
+
+
+def test_verify_no_declara_recorte_si_el_readme_entra_entero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "README.md").write_text("x" * 24_000, encoding="utf-8")
+    fake_client = _FakeClient(content=_claims_payload())
+    monkeypatch.setattr(semantic_check, "get_client", lambda: fake_client)
+
+    resultado = semantic_check.verify(RepoContext(path=tmp_path), {})
+
+    assert resultado.verdict == Verdict.APROBADO
+    assert resultado.evidence == []
+
+
+def test_no_cruza_contra_una_nota_que_dice_que_no_es_un_fallo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caso real de `pytransitions/transitions`. El badge de Build Status
+    salio "contradicho" por una nota que dice explicitamente que la
+    situacion esta bien - comparten el token 'build' y nada mas."""
+    (tmp_path / "README.md").write_text(
+        "# demo\n\n[![Build Status](https://ejemplo/badge.svg)](https://ejemplo)\n",
+        encoding="utf-8",
+    )
+    content = _claims_payload(
+        ("El proyecto tiene build status verde", "[![Build Status](https://ejemplo/badge.svg)]")
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.APROBADO_CON_OBSERVACIONES,
+            evidence=[
+                Evidence(
+                    file="requirements.txt",
+                    line=1,
+                    note=(
+                        "'mypy' se importa sin declarar, pero es una herramienta "
+                        "de build/automatizacion: tiene que estar instalada por fuera "
+                        "del proyecto para poder correr el script que la invoca"
+                    ),
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_no_cruza_contra_un_mapeo_conocido(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caso real de `arrow-py/arrow`. "Support for Python 3.8+" salio
+    "contradicho" por la nota del mapeo import->paquete, que termina con
+    'no es un fallo real' - comparten el token 'python'."""
+    (tmp_path / "README.rst").write_text(
+        "demo\n====\n\nSupport for Python 3.8+\n", encoding="utf-8"
+    )
+    content = _claims_payload(("Soporta Python 3.8+", "Support for Python 3.8+"))
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.APROBADO_CON_OBSERVACIONES,
+            evidence=[
+                Evidence(
+                    file="pyproject.toml",
+                    line=1,
+                    note=(
+                        "'dateutil' se importa pero fue declarado como "
+                        "'python-dateutil' - mapeo conocido, no es un fallo real"
+                    ),
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_no_cruza_contra_una_nota_de_algo_que_no_se_verifico(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"No lo miramos" no contradice nada. Sin este filtro, el aviso de que
+    pip-audit no pudo completarse se leia como evidencia contra cualquier
+    afirmacion que compartiera una palabra con el."""
+    (tmp_path / "README.md").write_text(
+        "# demo\n\nSin vulnerabilidades conocidas.\n", encoding="utf-8"
+    )
+    content = _claims_payload(
+        ("no tiene vulnerabilidades", "Sin vulnerabilidades conocidas.")
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.APROBADO_CON_OBSERVACIONES,
+            evidence=[
+                Evidence(
+                    file="pip-audit",
+                    line=0,
+                    note="pip-audit no pudo completarse a tiempo - vulnerabilidades no verificadas",
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_una_nota_benigna_no_tapa_a_las_que_vienen_despues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`continue` -> `break` sobrevivia. Con `break`, la primera nota benigna
+    cortaba el recorrido entero y toda la evidencia posterior quedaba sin
+    mirar: un aviso de "esto esta bien" tapando hallazgos reales."""
+    (tmp_path / "README.md").write_text(
+        "# demo\n\nThis project has complete test coverage.\n", encoding="utf-8"
+    )
+    content = _claims_payload(
+        ("complete test coverage", "This project has complete test coverage.")
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.NO_SOSTENIBLE,
+            evidence=[
+                Evidence(
+                    file="pyproject.toml",
+                    line=1,
+                    note=(
+                        "'dateutil' se importa pero fue declarado como "
+                        "'python-dateutil' - mapeo conocido, no es un fallo real"
+                    ),
+                ),
+                Evidence(
+                    file="README.md",
+                    line=3,
+                    note='README afirma "coverage" pero no hay funciones de test en el repo',
+                ),
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert len(result.evidence) == 1
+    assert "no hay funciones de test" in result.evidence[0].note

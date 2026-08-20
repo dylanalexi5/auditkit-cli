@@ -710,3 +710,25 @@ def test_verify_skips_a_no_reportable_unused_dep_but_still_reports_the_next_one(
     assert any(
         "unused_real_dep" in e.note and "no se usa" in e.note for e in result.evidence
     )
+
+
+def test_verify_python_dateutil_declarado_e_importado_como_dateutil(
+    tmp_path: Path,
+) -> None:
+    """Caso real de `arrow-py/arrow`: declara `python-dateutil` e importa
+    `dateutil`. Sin el mapeo salian DOS hallazgos falsos de una sola causa
+    ('dateutil' sin declarar y 'python_dateutil' sin usar) y el veredicto
+    final del repo era NO_SOSTENIBLE por un problema de nombres."""
+    (tmp_path / "requirements.txt").write_text("python-dateutil==2.9.0\n")
+    (tmp_path / "app.py").write_text("from dateutil import tz\n\ntz\n")
+
+    result = deps_check.verify(RepoContext.from_path(tmp_path))
+
+    assert not any("no esta declarado" in e.note for e in result.evidence)
+    assert not any("no se usa en el codigo" in e.note for e in result.evidence)
+    assert any(
+        "dateutil" in e.note
+        and "python-dateutil" in e.note
+        and "mapeo conocido" in e.note
+        for e in result.evidence
+    )

@@ -99,3 +99,32 @@ def test_verify_flat_layout_own_package_is_importable(tmp_path: Path) -> None:
 
     assert result.verdict == Verdict.APROBADO
     assert result.evidence == []
+
+
+def test_verify_module_not_found_con_mapeo_conocido_es_observaciones(
+    tmp_path: Path,
+) -> None:
+    """El downgrade comparaba el nombre del IMPORT contra los nombres
+    DECLARADOS sin pasar por el mapeo import->paquete. En `arrow-py/arrow`
+    eso convertia un fallo de nuestro entorno —no tenemos instalado
+    `python-dateutil`— en un NO_SOSTENIBLE del repo auditado.
+
+    El fixture depende de que `dateutil` NO este instalado en el entorno que
+    corre los tests: si lo estuviera, pytest pasaria y el test fallaria a la
+    vista, no en silencio.
+    """
+    _write_pyproject(tmp_path)
+    (tmp_path / "requirements.txt").write_text("python-dateutil==2.9.0\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_broken.py").write_text(
+        "import dateutil\n\n\ndef test_thing():\n    assert True\n"
+    )
+
+    result = build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert any(
+        "test_broken.py" in e.file and "dependencia declarada no instalada" in e.note
+        for e in result.evidence
+    )
