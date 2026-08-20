@@ -454,6 +454,26 @@ def test_verify_timeout_is_observaciones_not_crash(
     assert len(result.evidence) == 1
 
 
+def _sonda_de_cuota():
+    """Una llamada minima con el system prompt real. Devuelve el 429 si no
+    hay cuota, o None si la hay."""
+    try:
+        get_client().chat.completions.create(
+            model=semantic_check._MODEL,
+            messages=[
+                {"role": "system", "content": semantic_check._SYSTEM_PROMPT},
+                {"role": "user", "content": "demo. Sonda de cuota."},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+            reasoning_effort="none",
+            timeout=20,
+        )
+    except groq.RateLimitError as exc:
+        return exc
+    return None
+
+
 @pytest.fixture
 def groq_con_cuota():
     """Salta el test si Groq esta sin cuota, en vez de dejarlo fallar.
@@ -468,19 +488,8 @@ def groq_con_cuota():
     La sonda usa el system prompt real para tener el tamano representativo:
     una llamada de 3 tokens puede entrar donde una de 600 no.
     """
-    try:
-        get_client().chat.completions.create(
-            model=semantic_check._MODEL,
-            messages=[
-                {"role": "system", "content": semantic_check._SYSTEM_PROMPT},
-                {"role": "user", "content": "demo. Sonda de cuota."},
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-            reasoning_effort="none",
-            timeout=20,
-        )
-    except groq.RateLimitError as exc:
+    exc = _sonda_de_cuota()
+    if exc is not None:
         pytest.skip(f"Groq sin cuota, validacion real no verificada: {exc}")
 
 
@@ -507,6 +516,16 @@ def test_verify_real_api_extracts_and_cross_references(tmp_path: Path, groq_con_
     }
 
     result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    if result.evidence and result.evidence[0].file == "(sin verificar)":
+        # La cuota se puede agotar ENTRE la sonda del fixture y esta llamada.
+        # Si al re-sondear sigue habiendo cuota, entonces la peticion real
+        # esta rota —el caso del `400 json_validate_failed`, que se veia
+        # exactamente asi— y eso si es un fallo del codigo.
+        exc = _sonda_de_cuota()
+        if exc is None:
+            pytest.fail(f"la API no respondio y hay cuota: {result.evidence[0].note}")
+        pytest.skip(f"Groq sin cuota, validacion real no verificada: {exc}")
 
     assert result.verdict in (Verdict.APROBADO, Verdict.APROBADO_CON_OBSERVACIONES)
     if result.verdict == Verdict.APROBADO_CON_OBSERVACIONES:
