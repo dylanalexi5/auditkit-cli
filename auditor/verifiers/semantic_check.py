@@ -50,6 +50,32 @@ _STOPWORDS = frozenset(
 )
 _UNAVAILABLE_NOTE_TEMPLATE = "verificador semántico saltado: {reason}"
 
+# No toda evidencia es un hallazgo. Los verificadores también escriben notas
+# que dicen "esto está bien" o "esto no lo miramos", y cruzarlas contra una
+# afirmación del README produce una contradicción donde no hay ninguna. Dos
+# casos reales medidos:
+#
+#   transitions  el badge de Build Status salió "contradicho" por
+#                "'mypy' ... es una herramienta de build/automatizacion"
+#                (comparten el token 'build', y nada más)
+#   arrow        "Support for Python 3.8+" salió "contradicho" por
+#                "'dateutil' ... mapeo conocido, no es un fallo real"
+#                (comparten el token 'python')
+#
+# El filtro es por texto, no estructural, y eso es deuda a nombre: la forma
+# correcta sería que `Evidence` dijera si es un hallazgo o una nota, en vez
+# de que este módulo reconozca las frases que escriben los otros. Se hace
+# así porque marcar la evidencia toca los cuatro verificadores, el reporte y
+# el JSON; la lista queda acá, corta y explícita, hasta que haga falta.
+_NOTAS_BENIGNAS = (
+    "no es un fallo real",
+    "herramienta de build/automatizacion",
+    "no verificado",
+    "no verificadas",
+    "no se verificaron",
+    "sin verificar",
+)
+
 _SYSTEM_PROMPT = (
     "Extraés afirmaciones verificables de un README de un repositorio de "
     "software. NO juzgás si son ciertas o falsas - eso lo hace otro sistema. "
@@ -171,6 +197,12 @@ def _locate_quote(readme_text: str, quote: str) -> int | None:
     return readme_text.count("\n", 0, index) + 1
 
 
+def _es_benigna(nota: str) -> bool:
+    """La nota dice "esto está bien" o "esto no lo miramos", no un hallazgo."""
+    minuscula = nota.lower()
+    return any(frase in minuscula for frase in _NOTAS_BENIGNAS)
+
+
 def _find_contradicting_evidence(
     claim_keywords: set[str],
     other_results: dict[str, VerifierResult],
@@ -180,6 +212,8 @@ def _find_contradicting_evidence(
         return None
     for result in other_results.values():
         for item in result.evidence:
+            if _es_benigna(item.note):
+                continue
             if claim_keywords & _keywords(item.note, exclude):
                 return item
     return None

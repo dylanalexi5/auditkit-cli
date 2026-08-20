@@ -536,3 +536,108 @@ def test_verify_no_declara_recorte_si_el_readme_entra_entero(
 
     assert resultado.verdict == Verdict.APROBADO
     assert resultado.evidence == []
+
+
+def test_no_cruza_contra_una_nota_que_dice_que_no_es_un_fallo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caso real de `pytransitions/transitions`. El badge de Build Status
+    salio "contradicho" por una nota que dice explicitamente que la
+    situacion esta bien - comparten el token 'build' y nada mas."""
+    (tmp_path / "README.md").write_text(
+        "# demo\n\n[![Build Status](https://ejemplo/badge.svg)](https://ejemplo)\n",
+        encoding="utf-8",
+    )
+    content = _claims_payload(
+        ("El proyecto tiene build status verde", "[![Build Status](https://ejemplo/badge.svg)]")
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.APROBADO_CON_OBSERVACIONES,
+            evidence=[
+                Evidence(
+                    file="requirements.txt",
+                    line=1,
+                    note=(
+                        "'mypy' se importa sin declarar, pero es una herramienta "
+                        "de build/automatizacion: tiene que estar instalada por fuera "
+                        "del proyecto para poder correr el script que la invoca"
+                    ),
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_no_cruza_contra_un_mapeo_conocido(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caso real de `arrow-py/arrow`. "Support for Python 3.8+" salio
+    "contradicho" por la nota del mapeo import->paquete, que termina con
+    'no es un fallo real' - comparten el token 'python'."""
+    (tmp_path / "README.rst").write_text(
+        "demo\n====\n\nSupport for Python 3.8+\n", encoding="utf-8"
+    )
+    content = _claims_payload(("Soporta Python 3.8+", "Support for Python 3.8+"))
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.APROBADO_CON_OBSERVACIONES,
+            evidence=[
+                Evidence(
+                    file="pyproject.toml",
+                    line=1,
+                    note=(
+                        "'dateutil' se importa pero fue declarado como "
+                        "'python-dateutil' - mapeo conocido, no es un fallo real"
+                    ),
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
+
+
+def test_no_cruza_contra_una_nota_de_algo_que_no_se_verifico(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"No lo miramos" no contradice nada. Sin este filtro, el aviso de que
+    pip-audit no pudo completarse se leia como evidencia contra cualquier
+    afirmacion que compartiera una palabra con el."""
+    (tmp_path / "README.md").write_text(
+        "# demo\n\nSin vulnerabilidades conocidas.\n", encoding="utf-8"
+    )
+    content = _claims_payload(
+        ("no tiene vulnerabilidades", "Sin vulnerabilidades conocidas.")
+    )
+    monkeypatch.setattr(semantic_check, "get_client", lambda: _FakeClient(content=content))
+
+    other_results = {
+        "deps_check": VerifierResult(
+            verdict=Verdict.APROBADO_CON_OBSERVACIONES,
+            evidence=[
+                Evidence(
+                    file="pip-audit",
+                    line=0,
+                    note="pip-audit no pudo completarse a tiempo - vulnerabilidades no verificadas",
+                )
+            ],
+        )
+    }
+
+    result = semantic_check.verify(RepoContext.from_path(tmp_path), other_results)
+
+    assert result.verdict == Verdict.APROBADO
+    assert result.evidence == []
