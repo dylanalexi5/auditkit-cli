@@ -16,7 +16,7 @@ import pytest
 
 from auditor.core import triage_agent
 from auditor.core.models import Evidence, Verdict, VerifierResult
-from auditor.core.semantic_client import get_client
+from auditor.core.semantic_client import MissingApiKeyError, get_client
 
 
 def _message(content=None, tool_calls=None):
@@ -1118,9 +1118,19 @@ def groq_con_cuota():
     La sonda usa el system prompt real para tener el tamano representativo.
     Una llamada de 3 tokens puede entrar donde una de 600 no - tambien
     verificado en la practica.
+
+    Sin credencial tambien salta, y no es un detalle: sin esto el fixture
+    revienta con MissingApiKeyError y los cinco tests reales salen como ERROR
+    en cualquier entorno sin clave -- CI incluido. Un test que no se puede
+    correr se saltea, no se rompe.
     """
     try:
-        get_client().chat.completions.create(
+        cliente = get_client()
+    except MissingApiKeyError as exc:
+        pytest.skip(f"Sin GROQ_API_KEY, validacion real no verificada: {exc}")
+
+    try:
+        cliente.chat.completions.create(
             model=triage_agent._MODEL,
             messages=[
                 {"role": "system", "content": triage_agent._SYSTEM_PROMPT},

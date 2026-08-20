@@ -8,6 +8,8 @@
 
 # auditkit-cli
 
+[![tests](https://github.com/dylanalexi5/auditkit-cli/actions/workflows/tests.yml/badge.svg)](https://github.com/dylanalexi5/auditkit-cli/actions/workflows/tests.yml)
+
 Auditor automático de credibilidad de repos: recibe una URL de GitHub y
 verifica si el README dice la verdad, contrastándolo contra el código, los
 tests y las dependencias reales — no contra lo que el README afirma.
