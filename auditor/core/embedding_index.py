@@ -19,6 +19,7 @@ mostró que no existía, desaparece del diseño. Quien lee la lista es quien
 juzga (ADR 0005).
 """
 
+import os
 from typing import Protocol
 
 # Multilingüe a propósito, y elegido midiendo. Batería de 5 preguntas con
@@ -59,6 +60,19 @@ _encoder_cacheado: Encoder | None = None
 def _cargar_encoder() -> Encoder:
     """Carga el modelo. Aislada en su propia función para poder sustituirla
     en los tests sin tocar red ni disco."""
+    # HuggingFace escribía dos cosas por stderr antes de la primera línea
+    # útil de `--ask`: un warning de que la petición va sin token y una barra
+    # de progreso de carga de pesos. Medido cuál apaga cuál, en subprocesos
+    # separados: la barra la apaga `HF_HUB_DISABLE_PROGRESS_BARS`, el warning
+    # `HF_HUB_VERBOSITY`, y ni `TRANSFORMERS_VERBOSITY` ni
+    # `HF_HUB_DISABLE_TELEMETRY` apagan ninguno de los dos.
+    #
+    # Va antes del import y con `setdefault` a propósito: las variables se
+    # leen cuando `huggingface_hub` se importa, y quien las haya puesto a
+    # mano —para depurar una descarga que falla— gana sobre nosotros.
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+
     from sentence_transformers import SentenceTransformer
 
     modelo = SentenceTransformer(_MODELO)
