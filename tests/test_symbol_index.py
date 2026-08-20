@@ -307,3 +307,32 @@ def test_init_no_se_registra_como_nombre_del_paquete(tmp_path: Path) -> None:
     indice = symbol_index.construir(tmp_path)
 
     assert indice.resuelve("demo", "__init__") == []
+
+
+def test_construir_registra_los_subpaquetes_como_nombres(tmp_path: Path) -> None:
+    """`transitions.extensions` cita un DIRECTORIO con `__init__.py`, no un
+    archivo. Medido contra `pytransitions/transitions`: su README lo cita y
+    el verificador reportaba "'extensions' no esta definido en el paquete
+    'transitions'" — un falso positivo sobre un subpaquete que existe."""
+    sub = tmp_path / "demo" / "extensions"
+    sub.mkdir(parents=True)
+    (tmp_path / "demo" / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "__init__.py").write_text("", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("demo", "extensions") == [
+        ("demo/extensions/__init__.py", 1)
+    ]
+
+
+def test_el_paquete_raiz_no_se_registra_dentro_de_si_mismo(tmp_path: Path) -> None:
+    """El `__init__.py` de la raiz tiene como directorio padre al paquete
+    mismo: registrarlo dejaria a `demo.demo` resolviendo."""
+    paquete = tmp_path / "demo"
+    paquete.mkdir()
+    (paquete / "__init__.py").write_text("", encoding="utf-8")
+
+    indice = symbol_index.construir(tmp_path)
+
+    assert indice.resuelve("demo", "demo") == []

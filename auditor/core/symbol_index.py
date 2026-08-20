@@ -154,8 +154,17 @@ def construir(root: Path, max_archivos: int = _MAX_ARCHIVOS) -> Indice:
 
         # El submódulo es un nombre citable: `requests.exceptions.HTTPError`
         # nombra `exceptions`, que es un archivo, no una definición.
+        #
+        # Un SUBPAQUETE es citable igual —`transitions.extensions`— solo que
+        # ahí el nombre lo pone el DIRECTORIO: su `__init__.py` no se llama
+        # como el módulo que representa. Sin esta rama, toda cita a un
+        # subpaquete real se reportaba como "no existe". Lo encontró la
+        # corrida sobre `pytransitions/transitions`, que tiene dos
+        # (`extensions/`, `experimental/`) y los cita en su README.
         if py_file.stem != "__init__":
             espacio.setdefault(py_file.stem, []).append((relativo, 1))
+        elif py_file.parent.name != raiz:
+            espacio.setdefault(py_file.parent.name, []).append((relativo, 1))
 
         for nombre, linea in _definiciones_de_nivel_superior(tree):
             espacio.setdefault(nombre, []).append((relativo, linea))
