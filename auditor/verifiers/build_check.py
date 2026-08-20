@@ -17,6 +17,11 @@ _SUMMARY_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+?\.py)(?:::\S+)?(?:\s+-\s+(
 _ERROR_DETAIL_LINE = re.compile(r"^E\s+(.+)$")
 _MODULE_NOT_FOUND = re.compile(r"ModuleNotFoundError: No module named '([^']+)'")
 _UNDECLARED_DEP_NOTE = "dependencia declarada no instalada - no verificado, no es un fallo real"
+# La linea del frame que fallo: `tests\test_x.py:7: AssertionError`. Es lo
+# unico de la salida de pytest que ubica el fallo — el resumen (`FAILED
+# tests/test_x.py::test_y`) nombra el archivo pero nunca la linea.
+_LOCATION_LINE = re.compile(r"^(\S+?\.py):(\d+): ")
+_SIN_UBICACION = "ubicacion no determinada en la salida de pytest"
 
 
 def _is_python_project(path: Path) -> bool:
@@ -43,6 +48,39 @@ def _pytest_env(path: Path) -> dict[str, str]:
         entries.append(existing)
 
     return {**os.environ, "PYTHONPATH": os.pathsep.join(entries)}
+
+
+def _ubicaciones(lines: list[str]) -> list[tuple[str, int]]:
+    """`(archivo, linea)` de cada frame que pytest ubica, en orden de salida.
+
+    Se normalizan las barras porque pytest imprime el traceback con el
+    separador del sistema (`tests\\test_x.py` en Windows) y el resumen
+    siempre con `/`.
+    """
+    return [
+        (match.group(1).replace("\\", "/"), int(match.group(2)))
+        for match in map(_LOCATION_LINE.match, lines)
+        if match
+    ]
+
+
+def _tomar_linea(ubicaciones: list[tuple[str, int]], archivo: str) -> int | None:
+    """La primera ubicacion pendiente de ese archivo, y la consume.
+
+    Consumirla importa: dos fallos en el mismo archivo estan en dos lineas
+    distintas, y pytest imprime las secciones de fallo y las del resumen en
+    el mismo orden. Sin consumir, el segundo fallo heredaria la linea del
+    primero — que es fabricar una ubicacion con otra cara.
+
+    None cuando no hay ninguna: pasa de verdad, por ejemplo cuando el fallo
+    ocurre dentro de un fixture de `conftest.py` y la unica linea que pytest
+    imprime es la del conftest, no la del archivo que nombra el resumen.
+    """
+    for indice, (ruta, linea) in enumerate(ubicaciones):
+        if ruta == archivo.replace("\\", "/"):
+            del ubicaciones[indice]
+            return linea
+    return None
 
 
 def verify(ctx: RepoContext) -> VerifierResult:
@@ -84,19 +122,26 @@ def verify(ctx: RepoContext) -> VerifierResult:
         or declarado_como(missing_module, ctx.declared_dependencies) is not None
     )
 
-    evidence = [
-        Evidence(
-            file=match.group(1),
-            line=1,
-            note=(
-                _UNDECLARED_DEP_NOTE
-                if is_declared_missing_dep
-                else (match.group(2) or fallback_detail).strip()
-            ),
+    ubicaciones = _ubicaciones(lines)
+    evidence: list[Evidence] = []
+    for match in map(_SUMMARY_LINE.match, lines):
+        if match is None:
+            continue
+        archivo = match.group(1)
+        nota = (
+            _UNDECLARED_DEP_NOTE
+            if is_declared_missing_dep
+            else (match.group(2) or fallback_detail).strip()
         )
-        for match in map(_SUMMARY_LINE.match, lines)
-        if match
-    ]
+        linea = _tomar_linea(ubicaciones, archivo)
+        if linea is None:
+            # Decirlo es el punto. Antes salia `line=1` escrito a mano: una
+            # ubicacion inventada, en la herramienta que existe para no
+            # dejar pasar afirmaciones sin respaldo.
+            nota = f"{nota} - {_SIN_UBICACION}"
+        evidence.append(
+            Evidence(file=archivo, line=0 if linea is None else linea, note=nota)
+        )
     if not evidence:
         evidence = [
             Evidence(
