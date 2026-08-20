@@ -5,14 +5,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-from auditor import ask
+from auditor import ask, cli_display
 from auditor.core import embedding_index, triage_agent
 from auditor.core.embedding_index import ModeloNoDisponibleError
 from auditor.core.models import AuditReport, worst_verdict
 from auditor.core.orchestrator import add_result
 from auditor.core.orchestrator import run as run_orchestrator
 from auditor.core.repo_context import RepoContext
-from auditor.report import to_json, to_markdown
+from auditor.report import to_json
 from auditor.verifiers import build_check, deps_check, readme_check, secrets, semantic_check
 
 _PASSIVE_VERIFIERS = {
@@ -56,7 +56,12 @@ def _confirm_run_tests() -> bool:
     if not sys.stdin.isatty():
         return False
     try:
-        answer = input(_RUN_TESTS_WARNING)
+        # El prompt va por stderr, no como argumento de `input()`. `input(x)`
+        # escribe `x` en STDOUT, y con `> salida.txt` eso dejaba el prompt
+        # pegado al título del reporte adentro del archivo. Encontrado
+        # verificando la redirección del ADR 0006.
+        print(_RUN_TESTS_WARNING, end="", file=sys.stderr, flush=True)
+        answer = input()
     except EOFError:
         return False
     return answer.strip().lower() == "y"
@@ -173,6 +178,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         skipped.append("build_check")
 
+    # Presentación y nada más (ADR 0006). El progreso se consigue DECORANDO
+    # los verificadores: `orchestrator.py` no se entera de que existe.
+    display = cli_display.Display.para(json_mode=args.json)
+    for nombre in skipped:
+        display.salteado(nombre)
+    verifiers = {
+        nombre: display.con_progreso(nombre, verify) for nombre, verify in verifiers.items()
+    }
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         repo_path = Path(tmp_dir) / "repo"
         try:
@@ -185,14 +199,20 @@ def main(argv: list[str] | None = None) -> int:
         report = run_orchestrator(ctx, verifiers, skipped_verifiers=skipped)
 
         if args.triage:
-            report = _apply_triage(report, ctx.path)
+            with display.spinner("triage"):
+                report = _apply_triage(report, ctx.path)
+            display.hecho("triage")
 
         if args.semantic:
-            semantic_result = semantic_check.verify(ctx, report.verifier_results)
+            with display.spinner("semantic_check"):
+                semantic_result = semantic_check.verify(ctx, report.verifier_results)
+            display.termina("semantic_check", semantic_result.verdict)
             report = add_result(report, "semantic_check", semantic_result)
 
-    output = to_json(report, args.url) if args.json else to_markdown(report, args.url)
-    print(output)
+    if args.json:
+        print(to_json(report, args.url))
+    else:
+        display.reporte(report, args.url)
     return 0
 
 

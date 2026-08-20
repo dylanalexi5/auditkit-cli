@@ -258,3 +258,25 @@ def test_ask_contra_un_repo_real_no_ensucia_la_salida() -> None:
     assert resultado.stderr == ""
     assert "Pregunta:" in resultado.stdout
     assert "similitud" in resultado.stdout
+
+
+def test_el_prompt_de_confirmacion_no_cae_en_la_salida(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Encontrado verificando `> salida.txt` del ADR 0006: con stdin en una
+    terminal y stdout redirigido, `input(prompt)` escribia el prompt en
+    stdout y quedaba pegado al titulo del reporte adentro del archivo.
+
+        Este repo va a ejecutar codigo real... [y/N] # Reporte de auditoria...
+
+    Es exactamente lo que la capa de presentacion existe para impedir: por
+    stdout va el reporte y nada mas.
+    """
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda *args: "n")
+
+    assert cli._confirm_run_tests() is False
+
+    capturado = capsys.readouterr()
+    assert capturado.out == ""
+    assert "Confirmás" in capturado.err

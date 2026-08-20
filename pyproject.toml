@@ -6,6 +6,13 @@ dependencies = [
     "detect-secrets>=1.5.0",
     "pip-audit>=2.7.0",
     "groq>=1.0",
+    # Solo pinta: el reporte se sigue armando a mano en report.py y en modo no
+    # interactivo sale identico al de siempre (ADR 0006). Va como dependencia
+    # principal y no como extra —a diferencia de sentence-transformers, que
+    # arrastra torch— porque es Python puro y la interfaz es la experiencia por
+    # defecto: un extra que hay que instalar para que el comando se vea bien es
+    # un extra que nadie instala.
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
