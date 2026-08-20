@@ -213,3 +213,131 @@ def test_verify_ignores_artifacts_generated_by_the_auditor(tmp_path: Path) -> No
 
     assert result.verdict == Verdict.APROBADO
     assert result.evidence == []
+
+
+# --- .secrets.baseline del repo auditado ----------------------------------
+# El baseline es la convencion de detect-secrets para "esto ya lo miramos y
+# lo aceptamos". Sin leerlo, cualquier repo con fixtures de test que llevan
+# secretos falsos a proposito —este mismo, sin ir mas lejos— sale
+# NO_SOSTENIBLE por su propio andamiaje de tests.
+
+
+def _baseline(tmp_path: Path, *entradas: tuple[str, str]) -> None:
+    """Escribe un `.secrets.baseline` con formato de detect-secrets."""
+    from detect_secrets.core.potential_secret import PotentialSecret
+
+    resultados: dict[str, list[dict]] = {}
+    for archivo, valor in entradas:
+        resultados.setdefault(archivo, []).append(
+            {
+                "type": "AWS Access Key",
+                "filename": archivo,
+                "hashed_secret": PotentialSecret.hash_secret(valor),
+                "is_verified": False,
+                "line_number": 1,
+            }
+        )
+    (tmp_path / ".secrets.baseline").write_text(
+        json.dumps({"version": "1.5.0", "results": resultados}), encoding="utf-8"
+    )
+
+
+def test_un_hallazgo_registrado_en_el_baseline_no_reprueba(tmp_path: Path) -> None:
+    (tmp_path / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    _baseline(tmp_path, ("config.py", "AKIAIOSFODNN7EXAMPLE"))
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+    assert any("config.py" in e.file for e in result.evidence)
+
+
+def test_el_hallazgo_registrado_sigue_en_el_reporte_y_dice_por_que(
+    tmp_path: Path,
+) -> None:
+    """Registrado no es invisible. El repo controla su propio baseline, asi
+    que dejar de mostrar el hallazgo seria dejar que el auditado apague al
+    auditor."""
+    (tmp_path / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    _baseline(tmp_path, ("config.py", "AKIAIOSFODNN7EXAMPLE"))
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert len(result.evidence) == 1
+    assert ".secrets.baseline" in result.evidence[0].note
+    assert "AWS Access Key" in result.evidence[0].note
+
+
+def test_el_baseline_no_puede_llevar_el_veredicto_a_aprobado(tmp_path: Path) -> None:
+    """Mismo techo que el agente de triage: puede bajar el ruido, no puede
+    declarar inocencia."""
+    (tmp_path / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    _baseline(tmp_path, ("config.py", "AKIAIOSFODNN7EXAMPLE"))
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict != Verdict.APROBADO
+
+
+def test_un_hallazgo_que_no_esta_en_el_baseline_sigue_reprobando(
+    tmp_path: Path,
+) -> None:
+    """El baseline aplica al secreto exacto que registra, no al archivo: si
+    alguien agrega una credencial nueva al lado de una ya aceptada, el
+    veredicto tiene que volver a NO_SOSTENIBLE."""
+    (tmp_path / "config.py").write_text(
+        'VIEJA = "AKIAIOSFODNN7EXAMPLE"\nNUEVA = "AKIAI44QH8DHBEXAMPLE"\n'
+    )
+    _baseline(tmp_path, ("config.py", "AKIAIOSFODNN7EXAMPLE"))
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+
+
+def test_un_baseline_ilegible_se_ignora_y_no_tumba_el_verificador(
+    tmp_path: Path,
+) -> None:
+    """Mismo criterio que el resto del proyecto ante un archivo ajeno roto:
+    se saltea. Y se saltea hacia el lado SEGURO — sin allowlist, el hallazgo
+    cuenta."""
+    (tmp_path / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    (tmp_path / ".secrets.baseline").write_text("{no es json", encoding="utf-8")
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+
+
+def test_un_baseline_de_otro_archivo_no_tapa_el_hallazgo(tmp_path: Path) -> None:
+    """El mismo secreto registrado para OTRO archivo no vale: la clave es el
+    par (archivo, hash), no el hash suelto."""
+    (tmp_path / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    _baseline(tmp_path, ("otro.py", "AKIAIOSFODNN7EXAMPLE"))
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+
+
+def test_el_baseline_encuentra_el_hallazgo_en_un_subdirectorio(tmp_path: Path) -> None:
+    """detect-secrets escribe la ruta con el separador del sistema —barra
+    invertida en Windows— y la lee igual en Linux. Se normaliza a `/` en los
+    dos lados, si no el baseline solo funciona en el SO donde se genero."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    _baseline(tmp_path, ("sub/config.py", "AKIAIOSFODNN7EXAMPLE"))
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+
+
+def test_sin_baseline_el_comportamiento_no_cambia(tmp_path: Path) -> None:
+    (tmp_path / "config.py").write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    assert ".secrets.baseline" not in result.evidence[0].note

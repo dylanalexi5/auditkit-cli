@@ -33,7 +33,58 @@ _GENERATED_DIR_SUFFIXES = (".egg-info",)
 # real con hooks pineados (pallets/click, ej.) dispara "Hex High Entropy
 # String" en cada rev. Se excluye por nombre de archivo, no por heuristica -
 # ver ADR 0001, seccion de limitaciones.
-_EXCLUDED_FILENAMES = frozenset({".pre-commit-config.yaml"})
+#
+# `.secrets.baseline` va por la misma puerta y por una razon mas fuerte: su
+# contenido son hashes POR CONSTRUCCION. Escanearlo hace que el archivo que
+# existe para bajar falsos positivos genere falsos positivos propios.
+_EXCLUDED_FILENAMES = frozenset({".pre-commit-config.yaml", ".secrets.baseline"})
+
+# La convencion de detect-secrets para "esto ya lo miramos y lo aceptamos".
+# Sin leerlo, cualquier repo con fixtures de test que llevan secretos falsos a
+# proposito —este mismo, sin ir mas lejos— sale NO_SOSTENIBLE por su propio
+# andamiaje de tests.
+_BASELINE_FILENAME = ".secrets.baseline"
+_NOTA_REGISTRADO = "registrado en .secrets.baseline del repo"
+
+
+def _ruta_normalizada(nombre: str) -> str:
+    """Misma forma en los dos lados de la comparacion.
+
+    detect-secrets escribe la ruta con el separador del sistema
+    (`sub\\otro.py` en Windows) y a veces con un `./` adelante segun como se
+    haya invocado. Sin normalizar, un baseline generado en Windows no sirve
+    en Linux y viceversa.
+    """
+    return nombre.replace("\\", "/").removeprefix("./")
+
+
+def _registrados(root: Path) -> frozenset[tuple[str, str]]:
+    """Pares `(archivo, hash)` que el repo ya registro y acepto.
+
+    Un baseline ilegible se ignora, y se ignora hacia el lado SEGURO: sin
+    allowlist, el hallazgo cuenta. Mismo criterio que el resto del proyecto
+    ante un archivo ajeno roto — no tumbar el verificador— pero acá el
+    sentido de la degradacion importa mas que el hecho de degradar.
+    """
+    archivo = root / _BASELINE_FILENAME
+    if not archivo.is_file():
+        return frozenset()
+    try:
+        datos = json.loads(archivo.read_text(encoding="utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return frozenset()
+
+    resultados = datos.get("results") if isinstance(datos, dict) else None
+    if not isinstance(resultados, dict):
+        return frozenset()
+
+    return frozenset(
+        (_ruta_normalizada(nombre), item["hashed_secret"])
+        for nombre, items in resultados.items()
+        if isinstance(items, list)
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("hashed_secret"), str)
+    )
 
 
 def _is_excluded(filename: str) -> bool:
@@ -102,13 +153,38 @@ def verify(ctx: RepoContext) -> VerifierResult:
     with default_settings():
         found = baseline.create(str(ctx.path), should_scan_all_files=True, root=str(ctx.path))
 
-    evidence = [
-        Evidence(file=filename, line=secret.line_number, note=secret.type)
-        for filename, secrets_in_file in found.data.items()
-        if not _is_excluded(filename) and not filename.endswith(".ipynb")
-        for secret in secrets_in_file
-    ]
-    evidence.extend(_scan_notebooks(ctx.path))
+    registrados = _registrados(ctx.path)
+    evidence: list[Evidence] = []
+    sin_registrar = 0
+    for filename, secrets_in_file in found.data.items():
+        if _is_excluded(filename) or filename.endswith(".ipynb"):
+            continue
+        for secret in secrets_in_file:
+            esta_registrado = (
+                _ruta_normalizada(filename),
+                secret.secret_hash,
+            ) in registrados
+            # Registrado no es invisible: el hallazgo sigue en el reporte, con
+            # su ubicacion y el motivo por el que no cuenta. El repo auditado
+            # controla su propio baseline, asi que dejar de mostrarlo seria
+            # dejar que el auditado apague al auditor.
+            nota = f"{secret.type} - {_NOTA_REGISTRADO}" if esta_registrado else secret.type
+            evidence.append(Evidence(file=filename, line=secret.line_number, note=nota))
+            sin_registrar += not esta_registrado
 
-    verdict = Verdict.NO_SOSTENIBLE if evidence else Verdict.APROBADO
+    # Los notebooks no pasan por el baseline: sus hallazgos salen de un
+    # archivo temporal por celda, asi que no hay ruta estable que registrar
+    # (ver el pendiente de `line=cell_index` anotado en CLAUDE.md).
+    notebooks = _scan_notebooks(ctx.path)
+    evidence.extend(notebooks)
+    sin_registrar += len(notebooks)
+
+    if sin_registrar:
+        verdict = Verdict.NO_SOSTENIBLE
+    elif evidence:
+        # Mismo techo que el agente de triage (ADR 0003): puede bajar el
+        # ruido, no puede declarar inocencia.
+        verdict = Verdict.APROBADO_CON_OBSERVACIONES
+    else:
+        verdict = Verdict.APROBADO
     return VerifierResult(verdict=verdict, evidence=evidence)

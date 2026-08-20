@@ -55,7 +55,12 @@ cuánto dejó afuera, con el detalle completo disponible en `--json`. Diseño en
 
 ## Verificadores
 
-- **secrets** — busca secretos reales en el código (`detect-secrets`).
+- **secrets** — busca secretos reales en el código (`detect-secrets`). Si el
+  repo auditado tiene un `.secrets.baseline` —la convención de
+  `detect-secrets` para "esto ya lo miramos y lo aceptamos"— los hallazgos
+  registrados ahí **no cuentan para `NO_SOSTENIBLE`, pero siguen en el
+  reporte**, con la nota de por qué no cuentan. Ver
+  [Seguridad](#seguridad).
 - **readme_check** — contrasta afirmaciones del README contra el código
   real, en dos formas independientes:
   - **Cobertura de tests**: "100% test coverage" contra la existencia real
@@ -216,6 +221,23 @@ revisión de seguridad, documentadas en detalle en el ADR):
   nombre plausible para esquivar un `NO_SOSTENIBLE` real. El MVP asume
   buena fe en lo declarado, no verifica que el paquete exista de verdad
   antes de aceptar el downgrade.
+- **El `.secrets.baseline` del repo auditado también es gameable, y por el
+  mismo motivo: lo escribe el repo.** Un repo puede registrar ahí una
+  credencial verdadera para que no cuente. La mitigación no es confiar
+  menos en el archivo sino **acotar lo que puede lograr**, con el mismo
+  techo que tiene el agente de triage:
+  - un hallazgo registrado **nunca desaparece del reporte** — sale con su
+    `archivo:línea` y con la nota `registrado en .secrets.baseline del
+    repo`, para que alguien lo mire;
+  - el baseline **no puede llevar el veredicto a `APROBADO`**: el piso es
+    `APROBADO_CON_OBSERVACIONES`. Puede bajar el ruido, no declarar
+    inocencia;
+  - la clave es el par `(archivo, hash del secreto)`, no el archivo: una
+    credencial nueva al lado de una ya aceptada vuelve a dar
+    `NO_SOSTENIBLE`.
+
+  Un baseline ilegible se ignora **hacia el lado seguro**: sin allowlist,
+  el hallazgo cuenta.
 
 ### Inyección de prompt contra el agente de triage
 
