@@ -19,6 +19,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # numpy va acá y no solo en `rag` porque `tests/test_embedding_index.py` y
+    # `tests/test_ask.py` lo importan a nivel de módulo: sin él, `pytest` ni
+    # siquiera llega a coleccionar. `sentence-transformers` no hace falta —
+    # esos tests inyectan el encoder— y por eso se queda en `rag`, con torch
+    # y sus 2 GB adentro.
+    "numpy>=1.24",
 ]
 # `--ask` es opt-in y sentence-transformers arrastra torch (~2GB), asi que va
 # como extra y no como dependencia principal. El manejo de

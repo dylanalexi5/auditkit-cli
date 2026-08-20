@@ -1,0 +1,63 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Un push nuevo a la misma rama cancela la corrida anterior: el resultado de
+# un commit que ya quedó atrás no le sirve a nadie.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Sin fail-fast: si 3.11 se rompe, igual quiero ver si 3.13 también.
+      fail-fast: false
+      matrix:
+        # El piso declarado en pyproject (`requires-python = ">=3.11"`, hace
+        # falta por `tomllib`) y una versión moderna. El desarrollo va sobre
+        # 3.14, así que el que más riesgo tiene de romperse es el piso.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar
+        # `.[rag]` queda afuera a propósito: arrastra torch (~2 GB) y solo lo
+        # necesitan los tests marcados `slow`, que también quedan afuera.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        # Sin `slow`: esos cargan el modelo de embeddings real (~500 MB de
+        # descarga) y no prueban lógica del proyecto sino que HuggingFace
+        # responda.
+        #
+        # No se pasa GROQ_API_KEY. Los cinco tests contra la API real de Groq
+        # se saltan solos y lo dicen en la salida (fixture `groq_con_cuota` y
+        # el `skipif` de semantic_check). Verificado localmente sacando la
+        # clave: 299 passed, 7 skipped, 4 deselected.
+        #
+        # Es una decisión, no un olvido: un secreto en CI que se usa contra
+        # una API con cuota diaria convierte cualquier PR de un tercero en
+        # una forma de gastarla, y el veredicto de esos cinco tests depende
+        # de un modelo no determinista — ya hay dos marcados `xfail` por eso.
+        run: pytest -q -m "not slow"
