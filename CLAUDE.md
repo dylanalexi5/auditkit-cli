@@ -17,6 +17,36 @@ dependencias reales — no contra lo que el README afirma.
   `triage_agent.py`— y en ambas la detectó el mutation testing, no la revisión
   del test. Vale para constantes, umbrales, timeouts y cualquier atributo del
   módulo bajo prueba.
+- **Ninguna `Evidence` puede llevar una ubicación que ningún test fije contra un
+  valor real.** `line=0` es la convención del proyecto para "sin ubicación", y
+  es honesta — pero solo si es una decisión, no un default que se coló. Si no
+  hay forma confiable de ubicar la línea, la nota tiene que decirlo
+  (`ubicacion no determinada`), no caer en `0` ni en `1` en silencio.
+  Este patrón —una ubicación fabricada sin test que la fije— ya apareció
+  **tres veces en tres módulos distintos**:
+
+  | módulo | qué inventaba | cómo se encontró |
+  |---|---|---|
+  | `semantic_check._locate_quote` | devolvía `1` cuando no encontraba la cita | revisión de código |
+  | `semantic_check` (aviso de recorte) | `line=0` sin test que lo fijara | mutation testing |
+  | `build_check` | `line=1` escrito a mano en el literal | mutation testing |
+
+  Es el bug que rompe la promesa central de la herramienta: evidencia que se
+  puede verificar, no inventada. Y las dos últimas las encontró el mutation
+  testing, no la revisión del test.
+
+## Mejoras futuras (anotadas, no implementadas)
+- **Helper de test compartido para la ubicación de la evidencia.** Que exista
+  algo como `assert_ubicacion_real(evidencia, archivo_esperado)` en
+  `tests/`, obligatorio para cualquier verificador nuevo, que falle si
+  `line` cae en un default sin que la nota lo declare. Hoy la regla de arriba
+  se cumple a mano y por eso ya se rompió tres veces. No se implementa
+  todavía porque el quinto verificador todavía no existe; cuando aparezca,
+  esto va antes que él.
+- **`build_check` mete la salida entera de pytest en la nota**
+  (`output[-2000:]`), y `semantic_check` la incrusta adentro de las suyas. El
+  reporte queda ilegible. Queda para el Bloque C (interfaz), donde se decide
+  cómo se presenta la evidencia.
 
 ## Comandos
 - Tests: `pytest`
