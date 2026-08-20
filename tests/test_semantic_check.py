@@ -7,7 +7,7 @@ import pytest
 
 from auditor.core.models import Evidence, Verdict, VerifierResult
 from auditor.core.repo_context import RepoContext
-from auditor.core.semantic_client import MissingApiKeyError
+from auditor.core.semantic_client import MissingApiKeyError, get_client
 from auditor.verifiers import semantic_check
 
 
@@ -454,11 +454,41 @@ def test_verify_timeout_is_observaciones_not_crash(
     assert len(result.evidence) == 1
 
 
+@pytest.fixture
+def groq_con_cuota():
+    """Salta el test si Groq esta sin cuota, en vez de dejarlo fallar.
+
+    Mismo criterio que el fixture homonimo de `test_triage_agent.py`, con
+    la diferencia importante de cual es el riesgo: alla la falta de cuota
+    hacia PASAR tests por el camino degradado (confianza falsa), y aca los
+    hace FALLAR, porque `verify` devuelve el camino de `_skipped` y el test
+    espera una cita real. Un fallo por cuota agotada no dice nada sobre el
+    codigo.
+
+    La sonda usa el system prompt real para tener el tamano representativo:
+    una llamada de 3 tokens puede entrar donde una de 600 no.
+    """
+    try:
+        get_client().chat.completions.create(
+            model=semantic_check._MODEL,
+            messages=[
+                {"role": "system", "content": semantic_check._SYSTEM_PROMPT},
+                {"role": "user", "content": "demo. Sonda de cuota."},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+            reasoning_effort="none",
+            timeout=20,
+        )
+    except groq.RateLimitError as exc:
+        pytest.skip(f"Groq sin cuota, validacion real no verificada: {exc}")
+
+
 @pytest.mark.skipif(
     not (os.environ.get("GROQ_API_KEY") or Path(".env").is_file()),
     reason="requiere GROQ_API_KEY real",
 )
-def test_verify_real_api_extracts_and_cross_references(tmp_path: Path) -> None:
+def test_verify_real_api_extracts_and_cross_references(tmp_path: Path, groq_con_cuota) -> None:
     (tmp_path / "README.md").write_text(
         "# demo\n\nThis project has 100% test coverage and is production-ready.\n"
     )
