@@ -1,3 +1,4 @@
+import itertools
 import json
 import tempfile
 from pathlib import Path
@@ -45,6 +46,24 @@ _EXCLUDED_FILENAMES = frozenset({".pre-commit-config.yaml", ".secrets.baseline"}
 # andamiaje de tests.
 _BASELINE_FILENAME = ".secrets.baseline"
 _NOTA_REGISTRADO = "registrado en .secrets.baseline del repo"
+
+# tests/certs/, test/certs/ - convencion para certificados TLS de prueba
+# generados a proposito (psf/requests: tests/certs/expired/ca/ca-private.key,
+# tests/certs/valid/server/server.key, para testear el cliente HTTP contra
+# certificados invalidos/expirados). No se ocultan -- bajarian la señal real
+# si alguien deja una clave de verdad en esa misma ruta -- se marcan para
+# revision manual y no cuentan solas para NO_SOSTENIBLE.
+_TEST_DIR_NAMES = frozenset({"tests", "test"})
+_CERT_FIXTURE_DIR_NAMES = frozenset({"certs", "cert"})
+_NOTA_FIXTURE_CERT = "posible fixture de certificados de test - revisar manualmente"
+
+
+def _es_fixture_de_certificados(filename: str) -> bool:
+    parts = [p.lower() for p in Path(filename).parts]
+    return any(
+        a in _TEST_DIR_NAMES and b in _CERT_FIXTURE_DIR_NAMES
+        for a, b in itertools.pairwise(parts)
+    )
 
 
 def _ruta_normalizada(nombre: str) -> str:
@@ -168,9 +187,15 @@ def verify(ctx: RepoContext) -> VerifierResult:
             # su ubicacion y el motivo por el que no cuenta. El repo auditado
             # controla su propio baseline, asi que dejar de mostrarlo seria
             # dejar que el auditado apague al auditor.
-            nota = f"{secret.type} - {_NOTA_REGISTRADO}" if esta_registrado else secret.type
+            es_fixture_cert = _es_fixture_de_certificados(filename)
+            if esta_registrado:
+                nota = f"{secret.type} - {_NOTA_REGISTRADO}"
+            elif es_fixture_cert:
+                nota = f"{secret.type} - {_NOTA_FIXTURE_CERT}"
+            else:
+                nota = secret.type
             evidence.append(Evidence(file=filename, line=secret.line_number, note=nota))
-            sin_registrar += not esta_registrado
+            sin_registrar += not esta_registrado and not es_fixture_cert
 
     # Los notebooks no pasan por el baseline: sus hallazgos salen de un
     # archivo temporal por celda, asi que no hay ruta estable que registrar
