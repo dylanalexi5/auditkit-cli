@@ -22,6 +22,13 @@ _UNDECLARED_DEP_NOTE = "dependencia declarada no instalada - no verificado, no e
 # tests/test_x.py::test_y`) nombra el archivo pero nunca la linea.
 _LOCATION_LINE = re.compile(r"^(\S+?\.py):(\d+): ")
 _SIN_UBICACION = "ubicacion no determinada en la salida de pytest"
+# Sin esto, cada pytest que lanza `verify()` puede abrir su propia consola en
+# blanco cuando el proceso padre no tiene una consola propia adjunta -- un
+# worker corriendo en background, por ejemplo. Con una sola llamada no se
+# nota; con mutation testing real (cientos de llamadas) esto colgo la
+# maquina de verdad, dos veces. CREATE_NO_WINDOW solo existe en Windows; el
+# `if` evita tocar el atributo en otros sistemas, donde no existe.
+_CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def _is_python_project(path: Path) -> bool:
@@ -83,6 +90,35 @@ def _tomar_linea(ubicaciones: list[tuple[str, int]], archivo: str) -> int | None
     return None
 
 
+def _agrupar(
+    hallazgos: list[tuple[str, int | None, str]],
+) -> list[tuple[str, int | None, str]]:
+    """Colapsa hallazgos que comparten el mismo mensaje base de pytest.
+
+    Un fixture compartido roto revienta en cada test que lo usa: en
+    `psf/requests`, el fixture `httpbin` generaba el mismo mensaje mas de 50
+    veces, una por test. Sin agrupar, esas 50 lineas del resumen de pytest se
+    volvian 50 `Evidence` identicas para un unico error real.
+    """
+    grupos: dict[str, list[tuple[str, int | None]]] = {}
+    for archivo, linea, nota_base in hallazgos:
+        grupos.setdefault(nota_base, []).append((archivo, linea))
+
+    resultado = []
+    for nota_base, ocurrencias in grupos.items():
+        archivo, linea = ocurrencias[0]
+        if len(ocurrencias) == 1:
+            resultado.append((archivo, linea, nota_base))
+            continue
+        archivos_unicos = list(dict.fromkeys(a for a, _ in ocurrencias))
+        nota = (
+            f"{nota_base} (repetido en {len(ocurrencias)} tests) - "
+            f"ver {', '.join(archivos_unicos)}"
+        )
+        resultado.append((archivo, linea, nota))
+    return resultado
+
+
 def verify(ctx: RepoContext) -> VerifierResult:
     if not _is_python_project(ctx.path):
         return VerifierResult(verdict=Verdict.APROBADO, evidence=[])
@@ -95,6 +131,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         timeout=_TIMEOUT_SECONDS,
         check=False,
         env=_pytest_env(ctx.path),
+        creationflags=_CREATIONFLAGS,
     )
 
     if result.returncode == 0:
@@ -123,7 +160,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
     )
 
     ubicaciones = _ubicaciones(lines)
-    evidence: list[Evidence] = []
+    hallazgos: list[tuple[str, int | None, str]] = []
     for match in map(_SUMMARY_LINE.match, lines):
         if match is None:
             continue
@@ -134,6 +171,10 @@ def verify(ctx: RepoContext) -> VerifierResult:
             else (match.group(2) or fallback_detail).strip()
         )
         linea = _tomar_linea(ubicaciones, archivo)
+        hallazgos.append((archivo, linea, nota))
+
+    evidence: list[Evidence] = []
+    for archivo, linea, nota in _agrupar(hallazgos):
         if linea is None:
             # Decirlo es el punto. Antes salia `line=1` escrito a mano: una
             # ubicacion inventada, en la herramienta que existe para no

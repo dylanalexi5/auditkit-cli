@@ -341,3 +341,95 @@ def test_sin_baseline_el_comportamiento_no_cambia(tmp_path: Path) -> None:
 
     assert result.verdict == Verdict.NO_SOSTENIBLE
     assert ".secrets.baseline" not in result.evidence[0].note
+
+
+# --- tests/certs/ - certificados TLS de prueba -----------------------------
+# psf/requests genera certificados expirados/validos a proposito para
+# testear el cliente HTTP: tests/certs/expired/ca/ca-private.key,
+# tests/certs/valid/server/server.key. detect-secrets los marca "Private Key"
+# igual que una clave real filtrada en produccion.
+
+_CLAVE_PEM = (
+    "-----BEGIN RSA PRIVATE KEY-----\n"
+    "MIIEpAIBAAKCAQEA1c7+9z5Pad7OejecsQ0bu3aumqCkybhoZq/N8QLnEDrQ+RvR\n"
+    "-----END RSA PRIVATE KEY-----\n"
+)
+
+
+def test_una_clave_bajo_tests_certs_no_tumba_sola_el_veredicto(tmp_path: Path) -> None:
+    certs_dir = tmp_path / "tests" / "certs" / "valid" / "server"
+    certs_dir.mkdir(parents=True)
+    (certs_dir / "server.key").write_text(_CLAVE_PEM)
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.APROBADO_CON_OBSERVACIONES
+
+
+def test_la_clave_de_tests_certs_sigue_en_el_reporte_marcada_para_revisar(
+    tmp_path: Path,
+) -> None:
+    """No se oculta -- se avisa. Ocultarla del todo perderia la señal real si
+    alguien deja una clave real en esa misma ruta."""
+    certs_dir = tmp_path / "tests" / "certs" / "expired" / "ca"
+    certs_dir.mkdir(parents=True)
+    (certs_dir / "ca-private.key").write_text(_CLAVE_PEM)
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert len(result.evidence) == 1
+    assert "Private Key" in result.evidence[0].note
+    assert "revisar manualmente" in result.evidence[0].note
+
+
+def test_una_clave_fuera_de_tests_certs_sigue_reprobando_entera(tmp_path: Path) -> None:
+    """El criterio es la ruta, no el tipo de secreto: la misma clave PEM
+    afuera de tests/certs/ no tiene por que ser una fixture."""
+    (tmp_path / "server.key").write_text(_CLAVE_PEM)
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    assert "revisar manualmente" not in result.evidence[0].note
+
+
+def test_una_clave_registrada_en_el_baseline_prevalece_sobre_la_fixture(
+    tmp_path: Path,
+) -> None:
+    """Si el repo ya la registro en su baseline, esa es la señal mas fuerte
+    -- no hace falta la heuristica de ruta encima."""
+    certs_dir = tmp_path / "tests" / "certs" / "valid" / "server"
+    certs_dir.mkdir(parents=True)
+    (certs_dir / "server.key").write_text(_CLAVE_PEM)
+    from detect_secrets.core.potential_secret import PotentialSecret
+
+    # PrivateKeyDetector es un RegexBasedDetector sin grupo de captura: lo
+    # que hashea es el texto que matchea el denylist ("BEGIN RSA PRIVATE
+    # KEY"), no el bloque PEM entero ni la linea con los guiones. Medido
+    # corriendo el scan real -- asumir que hashea la linea completa daba un
+    # hash que nunca coincidia con el que produce detect-secrets de verdad.
+    hashed = PotentialSecret.hash_secret("BEGIN RSA PRIVATE KEY")
+    (tmp_path / ".secrets.baseline").write_text(
+        json.dumps(
+            {
+                "version": "1.5.0",
+                "results": {
+                    "tests/certs/valid/server/server.key": [
+                        {
+                            "type": "Private Key",
+                            "filename": "tests/certs/valid/server/server.key",
+                            "hashed_secret": hashed,
+                            "is_verified": False,
+                            "line_number": 1,
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = secrets.verify(RepoContext.from_path(tmp_path))
+
+    assert ".secrets.baseline" in result.evidence[0].note
+    assert "revisar manualmente" not in result.evidence[0].note

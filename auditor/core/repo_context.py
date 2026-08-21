@@ -29,6 +29,26 @@ def is_test_fixture_path(relative_parts: tuple[str, ...]) -> bool:
     )
 
 
+# Lista abierta, igual que el mapeo import->paquete de abajo: se amplia
+# cuando aparezca un caso real, no antes.
+_SAMPLE_CODE_DIR_NAMES = frozenset({"examples"})
+
+
+def is_sample_code_path(relative_parts: tuple[str, ...]) -> bool:
+    """examples/ trae scripts de demo empaquetados junto al proyecto, pero no
+    son el proyecto: importan lo que haga falta para ilustrar un uso, sin que
+    eso sea una dependencia real que declarar.
+
+    pallets/click tiene examples/imagepipe/imagepipe.py (`from PIL import
+    Image`) y examples/complex/complex/ -- un paquete de ejemplo LLAMADO
+    literalmente `complex`. Sin este filtro, deps_check reportaba los dos
+    como import no declarado: 'complex' parece a primera vista una confusion
+    con el builtin del mismo nombre, pero no lo es -- es un import real de un
+    paquete real, que simplemente no es codigo del proyecto."""
+    lowered = {part.lower() for part in relative_parts}
+    return bool(lowered & _SAMPLE_CODE_DIR_NAMES)
+
+
 # Mapeo import -> paquete PyPI para los casos mas comunes donde divergen.
 # Lista abierta, no exhaustiva - se amplia cuando aparezca un caso real.
 #

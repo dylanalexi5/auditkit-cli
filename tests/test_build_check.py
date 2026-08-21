@@ -1,4 +1,6 @@
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from auditor.core.models import Verdict
 from auditor.core.repo_context import RepoContext
@@ -225,3 +227,79 @@ def test_sin_lineas_de_resumen_la_evidencia_no_finge_un_archivo(
     assert len(result.evidence) == 1
     assert result.evidence[0].file == "pytest"
     assert result.evidence[0].line == 0
+
+
+def test_el_mismo_error_en_varios_tests_colapsa_en_una_sola_evidencia(
+    tmp_path: Path,
+) -> None:
+    """Reproduce psf/requests --run-tests: un fixture compartido roto (ahi,
+    httpbin) revienta en cada test que lo usa, y el mismo mensaje de pytest
+    salia una vez por test -- mas de 50 evidencias identicas para un unico
+    error real. Con un fixture roto usado por 3 tests en 2 archivos, tiene
+    que quedar UNA evidencia, no tres."""
+    _write_pyproject(tmp_path)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef roto():\n"
+        '    raise RuntimeError("fixture rota")\n',
+        encoding="utf-8",
+    )
+    (tests_dir / "test_a.py").write_text(
+        "def test_uno(roto):\n    pass\n\n\ndef test_dos(roto):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_b.py").write_text(
+        "def test_tres(roto):\n    pass\n", encoding="utf-8"
+    )
+
+    result = build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert result.verdict == Verdict.NO_SOSTENIBLE
+    assert len(result.evidence) == 1
+    nota = result.evidence[0].note
+    assert "repetido en 3 tests" in nota
+    assert "tests/test_a.py" in nota
+    assert "tests/test_b.py" in nota
+
+
+def test_verify_suprime_la_ventana_de_consola_en_windows(tmp_path: Path) -> None:
+    """`verify()` lanza un pytest real por subprocess. Sin creationflags, un
+    proceso sin consola propia adjunta (un worker en background, tal cual
+    corre mutation testing real) puede abrir una ventana de consola en
+    blanco por cada invocacion -- con cientos de invocaciones esto colgo la
+    maquina de verdad, dos veces. CREATE_NO_WINDOW (0x08000000) solo existe
+    en Windows; en otros sistemas el valor tiene que ser 0, que
+    subprocess.run acepta y ignora sin error."""
+    esperado = 0x08000000 if sys.platform == "win32" else 0
+    assert build_check._CREATIONFLAGS == esperado
+
+    _write_pyproject(tmp_path)
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    with patch(
+        "auditor.verifiers.build_check.subprocess.run", return_value=_FakeResult()
+    ) as mock_run:
+        build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert mock_run.call_args.kwargs["creationflags"] == esperado
+
+
+def test_errores_con_causa_distinta_no_se_mezclan(tmp_path: Path) -> None:
+    """El colapso es por mensaje de error, no por "hubo mas de un fallo": dos
+    causas distintas siguen siendo dos evidencias."""
+    _write_pyproject(tmp_path)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_dos.py").write_text(
+        "def test_uno():\n    assert 1 == 2\n\n\ndef test_dos():\n    assert 3 == 4\n",
+        encoding="utf-8",
+    )
+
+    result = build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert len(result.evidence) == 2
