@@ -22,6 +22,13 @@ _UNDECLARED_DEP_NOTE = "dependencia declarada no instalada - no verificado, no e
 # tests/test_x.py::test_y`) nombra el archivo pero nunca la linea.
 _LOCATION_LINE = re.compile(r"^(\S+?\.py):(\d+): ")
 _SIN_UBICACION = "ubicacion no determinada en la salida de pytest"
+# Sin esto, cada pytest que lanza `verify()` puede abrir su propia consola en
+# blanco cuando el proceso padre no tiene una consola propia adjunta -- un
+# worker corriendo en background, por ejemplo. Con una sola llamada no se
+# nota; con mutation testing real (cientos de llamadas) esto colgo la
+# maquina de verdad, dos veces. CREATE_NO_WINDOW solo existe en Windows; el
+# `if` evita tocar el atributo en otros sistemas, donde no existe.
+_CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def _is_python_project(path: Path) -> bool:
@@ -124,6 +131,7 @@ def verify(ctx: RepoContext) -> VerifierResult:
         timeout=_TIMEOUT_SECONDS,
         check=False,
         env=_pytest_env(ctx.path),
+        creationflags=_CREATIONFLAGS,
     )
 
     if result.returncode == 0:

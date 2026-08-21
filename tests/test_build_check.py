@@ -1,4 +1,6 @@
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from auditor.core.models import Verdict
 from auditor.core.repo_context import RepoContext
@@ -259,6 +261,32 @@ def test_el_mismo_error_en_varios_tests_colapsa_en_una_sola_evidencia(
     assert "repetido en 3 tests" in nota
     assert "tests/test_a.py" in nota
     assert "tests/test_b.py" in nota
+
+
+def test_verify_suprime_la_ventana_de_consola_en_windows(tmp_path: Path) -> None:
+    """`verify()` lanza un pytest real por subprocess. Sin creationflags, un
+    proceso sin consola propia adjunta (un worker en background, tal cual
+    corre mutation testing real) puede abrir una ventana de consola en
+    blanco por cada invocacion -- con cientos de invocaciones esto colgo la
+    maquina de verdad, dos veces. CREATE_NO_WINDOW (0x08000000) solo existe
+    en Windows; en otros sistemas el valor tiene que ser 0, que
+    subprocess.run acepta y ignora sin error."""
+    esperado = 0x08000000 if sys.platform == "win32" else 0
+    assert build_check._CREATIONFLAGS == esperado
+
+    _write_pyproject(tmp_path)
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    with patch(
+        "auditor.verifiers.build_check.subprocess.run", return_value=_FakeResult()
+    ) as mock_run:
+        build_check.verify(RepoContext.from_path(tmp_path))
+
+    assert mock_run.call_args.kwargs["creationflags"] == esperado
 
 
 def test_errores_con_causa_distinta_no_se_mezclan(tmp_path: Path) -> None:
